@@ -15,15 +15,20 @@ export const KATEGORI = {
   penyesuaian_keluar: 'KELUAR', // dibuat otomatis oleh stok opname
 };
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   const lama = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'items'").get();
   const versi = db.prepare('PRAGMA user_version').get().user_version;
-  if (lama && versi < SCHEMA_VERSION)
+  if (lama && versi < 2)
     throw new Error(`Database ${file} memakai skema lama (tanpa unit/login). Hapus file tersebut untuk memulai ulang.`);
+  if (lama && versi === 2) { // v2 -> v3: email pengguna & tautan transfer pada transaksi
+    const has = (t, c) => db.prepare(`PRAGMA table_info(${t})`).all().some((r) => r.name === c);
+    if (!has('users', 'email')) db.exec('ALTER TABLE users ADD COLUMN email TEXT');
+    if (!has('transactions', 'transfer_id')) db.exec('ALTER TABLE transactions ADD COLUMN transfer_id INTEGER');
+  }
   db.exec(`
     PRAGMA foreign_keys = ON;
     CREATE TABLE IF NOT EXISTS units (
@@ -41,7 +46,16 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
       unit_id INTEGER REFERENCES units(id),
       aktif INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      email TEXT,
       CHECK ((role = 'SUPER_ADMIN' AND unit_id IS NULL) OR (role <> 'SUPER_ADMIN' AND unit_id IS NOT NULL))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email COLLATE NOCASE) WHERE email IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS password_resets (
+      token_hash TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL,            -- epoch ms
+      expires_at INTEGER NOT NULL,
+      used INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash TEXT PRIMARY KEY,
@@ -83,11 +97,36 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
       diputuskan_oleh INTEGER REFERENCES users(id),
       diputuskan_at TEXT,
       catatan_keputusan TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      transfer_id INTEGER
     );
+    CREATE INDEX IF NOT EXISTS idx_tx_transfer ON transactions(transfer_id);
     CREATE INDEX IF NOT EXISTS idx_tx_item ON transactions(item_id, tanggal);
     CREATE INDEX IF NOT EXISTS idx_tx_tanggal ON transactions(tanggal);
     CREATE INDEX IF NOT EXISTS idx_tx_status ON transactions(status);
+    CREATE TABLE IF NOT EXISTS transfers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      unit_asal_id INTEGER NOT NULL REFERENCES units(id),
+      unit_tujuan_id INTEGER NOT NULL REFERENCES units(id),
+      item_asal_id INTEGER NOT NULL REFERENCES items(id),
+      item_tujuan_id INTEGER REFERENCES items(id),   -- dipetakan oleh unit tujuan saat penerimaan
+      qty REAL NOT NULL CHECK (qty > 0),
+      harga_satuan REAL NOT NULL DEFAULT 0,          -- harga rata-rata unit asal saat dikirim
+      tanggal TEXT NOT NULL,
+      no_dokumen TEXT NOT NULL DEFAULT '',
+      keterangan TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'DIAJUKAN' CHECK (status IN
+        ('DIAJUKAN','DIKIRIM','DIPERIKSA','DITERIMA','DITOLAK_ASAL','DIKEMBALIKAN','DIBATALKAN')),
+      catatan_keputusan TEXT NOT NULL DEFAULT '',
+      dibuat_oleh INTEGER REFERENCES users(id),
+      disetujui_asal_oleh INTEGER REFERENCES users(id),
+      diterima_oleh INTEGER REFERENCES users(id),
+      disetujui_tujuan_oleh INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      CHECK (unit_asal_id <> unit_tujuan_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tr_asal ON transfers(unit_asal_id, status);
+    CREATE INDEX IF NOT EXISTS idx_tr_tujuan ON transfers(unit_tujuan_id, status);
     CREATE TABLE IF NOT EXISTS opnames (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       unit_id INTEGER NOT NULL REFERENCES units(id),

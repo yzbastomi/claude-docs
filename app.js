@@ -1,6 +1,7 @@
 import { KATEGORI, STOK_SQL } from './db.js';
 import { HttpError } from './errors.js';
 import { hashPassword, validPassword } from './auth.js';
+import { transferRoutes } from './transfer.js';
 
 export { HttpError };
 const bad = (m) => new HttpError(400, m);
@@ -81,9 +82,9 @@ export function createApi(db) {
     return { tanggal, jenis, kategori, item_id: item.id, qty, harga_satuan: jenis === 'MASUK' ? harga_satuan : 0, pihak: str(b.pihak), no_dokumen: str(b.no_dokumen), keterangan: str(b.keterangan), stok: item.stok };
   }
   const insertTx = (t, extra = {}) =>
-    run(`INSERT INTO transactions (tanggal,jenis,kategori,item_id,qty,harga_satuan,pihak,no_dokumen,keterangan,opname_id,status,dibuat_oleh,diputuskan_oleh,diputuskan_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, t.tanggal, t.jenis, t.kategori, t.item_id, t.qty, t.harga_satuan, t.pihak, t.no_dokumen, t.keterangan,
-      extra.opname_id ?? null, extra.status ?? 'MENUNGGU', extra.dibuat_oleh ?? null, extra.diputuskan_oleh ?? null, extra.diputuskan_oleh ? new Date().toISOString() : null);
+    run(`INSERT INTO transactions (tanggal,jenis,kategori,item_id,qty,harga_satuan,pihak,no_dokumen,keterangan,opname_id,status,dibuat_oleh,diputuskan_oleh,diputuskan_at,transfer_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, t.tanggal, t.jenis, t.kategori, t.item_id, t.qty, t.harga_satuan, t.pihak, t.no_dokumen, t.keterangan,
+      extra.opname_id ?? null, extra.status ?? 'MENUNGGU', extra.dibuat_oleh ?? null, extra.diputuskan_oleh ?? null, extra.diputuskan_oleh ? new Date().toISOString() : null, extra.transfer_id ?? null);
 
   // Saldo (hanya transaksi disetujui) tidak boleh negatif pada titik waktu mana pun
   function assertNoNegative(item_id) {
@@ -129,6 +130,10 @@ export function createApi(db) {
       nilai_persediaan: items.reduce((s, i) => s + i.nilai, 0),
       transaksi_bulan_ini: n(`SELECT COUNT(*) AS n FROM transactions t JOIN items i ON i.id=t.item_id WHERE t.status='DISETUJUI' AND substr(t.tanggal,1,7)=? ${w}`, bulan, ...p),
       menunggu_transaksi: n(`SELECT COUNT(*) AS n FROM transactions t JOIN items i ON i.id=t.item_id WHERE t.status='MENUNGGU' ${w}`, ...p),
+      transfer_perlu_tindakan: user.role === AP
+        ? n(`SELECT COUNT(*) AS n FROM transfers WHERE (unit_asal_id = ? AND status = 'DIAJUKAN') OR (unit_tujuan_id = ? AND status = 'DIPERIKSA')`, user.unit_id, user.unit_id)
+        : user.role === OP ? n(`SELECT COUNT(*) AS n FROM transfers WHERE unit_tujuan_id = ? AND status = 'DIKIRIM'`, user.unit_id)
+        : n(`SELECT COUNT(*) AS n FROM transfers WHERE status IN ('DIAJUKAN','DIKIRIM','DIPERIKSA') ${unit ? 'AND (unit_asal_id = ? OR unit_tujuan_id = ?)' : ''}`, ...(unit ? [unit, unit] : [])),
       menunggu_opname: n(`SELECT COUNT(*) AS n FROM opnames o WHERE o.status='DIAJUKAN' ${unit ? 'AND o.unit_id = ?' : ''}`, ...p),
     };
   }
@@ -185,6 +190,12 @@ export function createApi(db) {
     }
     if (!str(b.nama)) throw bad('Nama wajib diisi');
     out.nama = str(b.nama);
+    const email = str(b.email).toLowerCase();
+    if (email) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 200) throw bad('Format email tidak valid');
+      if (get('SELECT 1 FROM users WHERE email = ? AND id IS NOT ?', email, id ?? null)) throw bad('Email sudah dipakai pengguna lain');
+    }
+    out.email = email || null;
     if (![SA, OP, AP].includes(b.role)) throw bad('Role tidak valid');
     out.role = b.role;
     if (b.role === SA) out.unit_id = null;
@@ -195,13 +206,17 @@ export function createApi(db) {
     }
     return out;
   }
-  const userRow = (id) => get(`SELECT u.id, u.username, u.nama, u.role, u.unit_id, u.aktif, un.kode AS unit_kode, un.nama AS unit_nama
+  const userRow = (id) => get(`SELECT u.id, u.username, u.nama, u.email, u.role, u.unit_id, u.aktif, un.kode AS unit_kode, un.nama AS unit_nama
                                FROM users u LEFT JOIN units un ON un.id = u.unit_id WHERE u.id = ?`, id);
+
+  const transfer = transferRoutes({ all, get, run, tx, audit, need, stokItem, itemUntuk, assertNoNegative, insertTx, bad, str, num, isDate, today, HttpError });
 
   // ---------- Router ----------
   // Mengembalikan body, atau [status, body]
   return function handle(method, path, query, body, user) {
     if (!user) throw new HttpError(401, 'Silakan login');
+    const tr = transfer(method, path, query, body, user);
+    if (tr !== undefined) return tr;
     let m;
     if (method === 'GET' && path === '/api/meta') return { kategori: KATEGORI };
     if (method === 'GET' && path === '/api/dashboard') return dashboard(user, query);
@@ -233,14 +248,14 @@ export function createApi(db) {
     // Pengguna
     if (path === '/api/users' && method === 'GET') {
       need(user, SA);
-      return all(`SELECT u.id, u.username, u.nama, u.role, u.unit_id, u.aktif, un.kode AS unit_kode, un.nama AS unit_nama
+      return all(`SELECT u.id, u.username, u.nama, u.email, u.role, u.unit_id, u.aktif, un.kode AS unit_kode, un.nama AS unit_nama
                   FROM users u LEFT JOIN units un ON un.id = u.unit_id ORDER BY u.role, un.kode, u.username`);
     }
     if (path === '/api/users' && method === 'POST') {
       need(user, SA);
       const v = validUser(body);
       validPassword(body.password);
-      const r = run('INSERT INTO users (username, nama, password_hash, role, unit_id) VALUES (?,?,?,?,?)', v.username, v.nama, hashPassword(body.password), v.role, v.unit_id);
+      const r = run('INSERT INTO users (username, nama, email, password_hash, role, unit_id) VALUES (?,?,?,?,?,?)', v.username, v.nama, v.email, hashPassword(body.password), v.role, v.unit_id);
       audit(user, 'user_baru', `${v.username} (${v.role})`);
       return [201, userRow(Number(r.lastInsertRowid))];
     }
@@ -252,7 +267,7 @@ export function createApi(db) {
       const v = validUser(body, id);
       const aktif = body.aktif === false || body.aktif === 0 ? 0 : 1;
       if (id === user.id && (!aktif || v.role !== SA)) throw bad('Anda tidak dapat menonaktifkan atau menurunkan role akun Anda sendiri');
-      run('UPDATE users SET nama=?, role=?, unit_id=?, aktif=? WHERE id=?', v.nama, v.role, v.unit_id, aktif, id);
+      run('UPDATE users SET nama=?, email=?, role=?, unit_id=?, aktif=? WHERE id=?', v.nama, v.email, v.role, v.unit_id, aktif, id);
       if (body.password) { validPassword(body.password); run('UPDATE users SET password_hash=? WHERE id=?', hashPassword(body.password), id); }
       if (!aktif || body.password || v.role !== target.role || v.unit_id !== target.unit_id) run('DELETE FROM sessions WHERE user_id = ?', id);
       audit(user, 'user_ubah', target.username);
@@ -283,7 +298,7 @@ export function createApi(db) {
           v.kode, v.nama, v.kategori, v.satuan, v.stok_minimum, body.aktif === false || body.aktif === 0 ? 0 : 1, it.id);
         return stokItem(it.id);
       }
-      if (get('SELECT 1 FROM transactions WHERE item_id = ? LIMIT 1', it.id) || get('SELECT 1 FROM opname_lines WHERE item_id = ? LIMIT 1', it.id))
+      if (get('SELECT 1 FROM transactions WHERE item_id = ? LIMIT 1', it.id) || get('SELECT 1 FROM opname_lines WHERE item_id = ? LIMIT 1', it.id) || get('SELECT 1 FROM transfers WHERE item_asal_id = ? OR item_tujuan_id = ? LIMIT 1', it.id, it.id))
         throw bad('Barang sudah punya riwayat; nonaktifkan saja (aktif = false)');
       run('DELETE FROM items WHERE id = ?', it.id);
       return { ok: true };

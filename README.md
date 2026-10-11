@@ -1,10 +1,11 @@
 # Stok Gudang
 
-Aplikasi web dasar untuk mengelola stok persediaan gudang. Tanpa dependensi npm: Node.js ≥ 22.13 (SQLite bawaan `node:sqlite`) dan frontend vanilla JS.
+Aplikasi web dasar untuk mengelola stok persediaan gudang. Node.js ≥ 22.13 (SQLite bawaan `node:sqlite`), frontend vanilla JS. Satu-satunya dependensi: `nodemailer` (hanya dimuat bila SMTP dikonfigurasi).
 
 ## Menjalankan
 
 ```bash
+npm install        # sekali, untuk nodemailer
 npm start          # http://localhost:3000  (PORT=... untuk mengganti port)
 npm run seed-demo  # opsional: 2 fakultas + akun contoh (hanya untuk mencoba)
 npm test           # tes backend (API, hak akses, login)
@@ -15,6 +16,22 @@ Data tersimpan di `data/stok.db` (ubah dengan `DB_FILE=/path/stok.db`). Basis da
 ### Login pertama
 
 Saat database masih kosong, server membuat akun **super admin** (`ADMIN_USERNAME`, default `admin`). Jika `ADMIN_PASSWORD` tidak diisi, password acak dicetak **sekali** di konsol. Setelah login, buat unit (fakultas) dan akun operator/approver di menu **Admin**. Di belakang HTTPS set `COOKIE_SECURE=1`.
+
+## Konfigurasi (variabel lingkungan)
+
+| Variabel | Fungsi |
+|---|---|
+| `PORT`, `DB_FILE` | Port (3000) dan lokasi database |
+| `BASE_URL` | URL publik aplikasi, dipakai pada tautan email reset (mis. `https://stok.kampus.ac.id`). **Wajib di produksi** |
+| `COOKIE_SECURE=1` | Tandai cookie sesi `Secure` (di belakang HTTPS) |
+| `ADMIN_USERNAME`, `ADMIN_PASSWORD` | Akun super admin pertama |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Email keluar untuk reset password. Port 465 = TLS langsung, selain itu STARTTLS. Tanpa `SMTP_HOST`, email hanya dicetak ke konsol (dev) |
+| `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | Aktifkan SSO OpenID Connect |
+| `OIDC_REDIRECT_URI` | Default `BASE_URL/api/auth/sso/callback` — daftarkan URL ini di IdP |
+| `OIDC_ALLOWED_DOMAIN` | Opsional, batasi domain email (pisahkan koma) |
+| `OIDC_EMAIL_CLAIM` | Default `email`; untuk Microsoft Entra bila tak ada gunakan `preferred_username` |
+| `OIDC_SCOPES`, `OIDC_LABEL` | Default `openid email profile` dan teks tombol |
+| `PASSWORD_LOGIN=off` | Hanya SSO; login password tetap tersedia untuk super admin (akses darurat) |
 
 ## Peran
 
@@ -36,6 +53,22 @@ Saat database masih kosong, server membuat akun **super admin** (`ADMIN_USERNAME
 | Dashboard | Stok kosong, stok menipis (≤ minimum), nilai persediaan |
 | Laporan | Tren barang keluar per bulan, pemakaian terbanyak + perkiraan hari stok habis, kartu stok per barang |
 
+## Transfer antar unit
+
+Menu **Transfer** memindahkan barang antar fakultas dengan jejak yang tertaut (kolom TRF# pada transaksi):
+
+1. Operator unit asal mengajukan (barang, unit tujuan, jumlah).
+2. Approver unit asal menyetujui → stok asal berkurang (transaksi `transfer_keluar`, nilai = harga rata-rata asal), status *Dikirim*.
+3. Operator unit tujuan memetakan ke barang miliknya (satuan harus sama) atau membuat barang baru dengan kode/nama yang sama → *Diperiksa*.
+4. Approver unit tujuan menyetujui → stok tujuan bertambah (transaksi `transfer_masuk`, harga ikut dari asal) → *Selesai*.
+
+Approver tujuan dapat menolak setelah *Dikirim*: stok otomatis kembali ke unit asal. Selama di perjalanan barang tidak dihitung di unit mana pun. Kategori "Transfer" pada form transaksi biasa tetap ada untuk pihak di luar aplikasi. Saat ini jumlah diterima harus sama dengan jumlah dikirim (selisih ditangani dengan menolak lalu mengajukan ulang).
+
+## Lupa password & SSO
+
+- **Reset mandiri**: tautan "Lupa password?" mengirim email berisi tautan sekali pakai (30 menit, di *fragment* URL sehingga tidak masuk log server). Respons selalu sama agar keberadaan akun tidak bocor; maksimum 3 permintaan/jam per akun dan 10/jam per IP. Setelah reset, semua sesi akun dicabut. Akun tanpa email tidak bisa memakainya — super admin mengisi email di menu Admin atau mengatur password langsung.
+- **SSO (OIDC)**: Authorization Code + PKCE, `state`/`nonce`, tanda tangan `id_token` (RS256) diverifikasi dengan JWKS IdP. SSO hanya membuktikan identitas: pengguna **harus sudah didaftarkan** super admin dengan email yang sama; peran dan unit tetap dari aplikasi (tanpa pembuatan akun otomatis). Hanya IdP berpenanda tangan RS256 yang didukung (Google, Entra, Keycloak default). Untuk Entra gunakan issuer spesifik tenant, bukan `common`. State login disimpan di memori proses (satu instance).
+
 ## Aturan bisnis
 
 - Transaksi berstatus `MENUNGGU` → `DISETUJUI`/`DITOLAK`. **Hanya yang disetujui memengaruhi stok**; yang sudah disetujui tidak dapat dihapus (koreksi lewat opname). Transaksi keluar dinilai dengan harga rata-rata saat disetujui.
@@ -48,7 +81,7 @@ Saat database masih kosong, server membuat akun **super admin** (`ADMIN_USERNAME
 
 ## Struktur
 
-`db.js` skema SQLite · `auth.js` password/sesi/login · `app.js` logika bisnis, API & otorisasi · `server.js` HTTP, cookie, CSRF · `public/` UI · `test/` tes.
+`db.js` skema SQLite · `auth.js` password/sesi/login/reset · `oidc.js` SSO · `mail.js` email · `transfer.js` transfer antar-unit · `app.js` logika bisnis, API & otorisasi · `server.js` HTTP, cookie, CSRF · `public/` UI · `test/` tes.
 
 ## Keamanan
 
@@ -56,4 +89,4 @@ Password di-hash scrypt; sesi berupa token acak (hanya hash-nya disimpan) di coo
 
 ## Belum ada (langkah lanjutan yang disarankan)
 
-Transfer antar-unit yang tertaut (keluar di satu unit otomatis jadi masuk di unit tujuan), reset password mandiri/SSO kampus, multi-gudang per unit, ekspor Excel/PDF, upload lampiran dokumen, batch/kedaluwarsa.
+Penerimaan transfer sebagian (jumlah diterima ≠ dikirim), notifikasi email untuk antrean persetujuan, penyimpanan state SSO bersama untuk banyak instance, multi-gudang per unit, ekspor Excel/PDF, upload lampiran dokumen, batch/kedaluwarsa.

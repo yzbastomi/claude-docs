@@ -4,10 +4,15 @@
   "description": "Aplikasi web dasar pengelolaan stok persediaan gudang",
   "type": "module",
   "private": true,
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "start": "node server.js",
     "seed-demo": "node seed-demo.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test --test-force-exit test/*.test.js"
+  },
+  "dependencies": {
+    "nodemailer": "^7.0.10"
   }
 }

@@ -41,3 +41,5 @@ nav{margin-top:8px}
 .err{color:var(--bad);min-height:1.4em;font-size:14px}
 .note{border-left:3px solid var(--warn);padding:6px 10px;background:var(--bg);margin:8px 0;font-size:14px}
 button.ok{background:var(--ok)}button.no{background:var(--bad)}
+.btn{display:block;text-align:center;padding:9px 14px;border-radius:6px;background:var(--pri);color:#fff;text-decoration:none}
+select[data-map]{max-width:200px}

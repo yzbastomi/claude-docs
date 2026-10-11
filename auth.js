@@ -23,11 +23,14 @@ export const validPassword = (pw) => {
   if (pw.length > 200) throw new HttpError(400, 'Password terlalu panjang');
 };
 
-export function createAuth(db) {
+const RESET_MS = 30 * 60 * 1000;
+const RESET_MAKS_PER_JAM = 3;
+
+export function createAuth(db, { mailer = null, baseUrl = 'http://localhost:3000', passwordLogin = true, log = console } = {}) {
   const gagal = new Map(); // "username|ip" -> { n, sampai }
   const audit = (user_id, aksi, detail = '') =>
     db.prepare('INSERT INTO audit_log (user_id, aksi, detail) VALUES (?,?,?)').run(user_id ?? null, aksi, detail);
-  const publik = (u) => ({ id: u.id, username: u.username, nama: u.nama, role: u.role, unit_id: u.unit_id, unit_nama: u.unit_nama ?? null, unit_kode: u.unit_kode ?? null });
+  const publik = (u) => ({ id: u.id, username: u.username, nama: u.nama, role: u.role, unit_id: u.unit_id, unit_nama: u.unit_nama ?? null, unit_kode: u.unit_kode ?? null, email: u.email ?? null });
 
   function login(username, password, ip = '') {
     const key = `${String(username).toLowerCase()}|${ip}`;
@@ -42,11 +45,60 @@ export function createAuth(db) {
       throw new HttpError(401, 'Username atau password salah');
     }
     gagal.delete(key);
+    if (!passwordLogin && u.role !== 'SUPER_ADMIN') throw new HttpError(403, 'Login dengan password dinonaktifkan; gunakan SSO');
+    audit(u.id, 'login');
+    return buatSesi(u);
+  }
+
+  function buatSesi(u) {
     db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
     const token = randomBytes(32).toString('hex');
     db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?,?,?)').run(sha(token), u.id, Date.now() + SESI_MS);
-    audit(u.id, 'login');
     return { token, user: publik(u), maxAge: SESI_MS / 1000 };
+  }
+
+  // Login SSO: email dari IdP harus cocok dengan pengguna aktif yang sudah didaftarkan.
+  function loginSso(email) {
+    const u = db.prepare(`SELECT u.*, un.nama AS unit_nama, un.kode AS unit_kode, un.aktif AS unit_aktif FROM users u LEFT JOIN units un ON un.id = u.unit_id
+                          WHERE u.email = ? COLLATE NOCASE`).get(String(email).trim());
+    if (!u || !u.aktif || (u.unit_id && !u.unit_aktif)) {
+      audit(u?.id, 'login_sso_gagal', String(email).slice(0, 100));
+      throw new HttpError(403, 'Akun Anda belum terdaftar di aplikasi ini. Hubungi super admin.');
+    }
+    audit(u.id, 'login_sso');
+    return buatSesi(u);
+  }
+
+  // Selalu berhasil dari sisi pemanggil (tidak membocorkan apakah akun ada). Email dikirim tanpa ditunggu.
+  function lupaPassword(identifier, ip = '') {
+    const ident = String(identifier ?? '').trim();
+    if (!ident || !mailer) return;
+    const u = db.prepare('SELECT * FROM users WHERE aktif = 1 AND email IS NOT NULL AND (username = ? OR email = ? COLLATE NOCASE)').get(ident, ident);
+    if (!u || (!passwordLogin && u.role !== 'SUPER_ADMIN')) return;
+    const sejam = Date.now() - 3600 * 1000;
+    if (db.prepare('SELECT COUNT(*) AS n FROM password_resets WHERE user_id = ? AND created_at > ?').get(u.id, sejam).n >= RESET_MAKS_PER_JAM) return;
+    db.prepare('UPDATE password_resets SET used = 1 WHERE user_id = ?').run(u.id); // tautan lama tidak berlaku lagi
+    const token = randomBytes(32).toString('hex');
+    db.prepare('INSERT INTO password_resets (token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)').run(sha(token), u.id, Date.now(), Date.now() + RESET_MS);
+    audit(u.id, 'reset_password_diminta', ip);
+    mailer.send({
+      to: u.email, subject: 'Reset password Stok Gudang',
+      text: `Halo ${u.nama},\n\nKami menerima permintaan reset password untuk akun "${u.username}".\nBuka tautan berikut dalam 30 menit untuk membuat password baru:\n\n${baseUrl}/#reset?token=${token}\n\nJika Anda tidak meminta ini, abaikan email ini; password Anda tidak berubah.\n`,
+    }).catch((e) => log.error('Gagal mengirim email reset:', e.message));
+  }
+
+  function resetPassword(token, baru) {
+    validPassword(baru);
+    const r = db.prepare('SELECT * FROM password_resets WHERE token_hash = ?').get(sha(String(token ?? '')));
+    if (!r || r.used || r.expires_at < Date.now()) throw new HttpError(400, 'Tautan reset tidak valid atau sudah kedaluwarsa');
+    db.exec('BEGIN');
+    try {
+      db.prepare('UPDATE password_resets SET used = 1 WHERE user_id = ?').run(r.user_id);
+      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(baru), r.user_id);
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(r.user_id); // paksa login ulang di semua perangkat
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+    audit(r.user_id, 'reset_password');
   }
 
   function userFromToken(token) {
@@ -76,5 +128,5 @@ export function createAuth(db) {
     return { username, password: pw, generated: !password };
   }
 
-  return { login, userFromToken, logout, ubahPassword, ensureAdmin, audit };
+  return { login, loginSso, lupaPassword, resetPassword, userFromToken, logout, ubahPassword, ensureAdmin, audit, passwordLogin, resetTersedia: !!mailer };
 }
