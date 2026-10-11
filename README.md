@@ -1,11 +1,11 @@
 # Stok Gudang
 
-Aplikasi web dasar untuk mengelola stok persediaan gudang. Node.js ≥ 22.13 (SQLite bawaan `node:sqlite`), frontend vanilla JS. Satu-satunya dependensi: `nodemailer` (hanya dimuat bila SMTP dikonfigurasi).
+Aplikasi web dasar untuk mengelola stok persediaan gudang. Node.js ≥ 22.13 (SQLite bawaan `node:sqlite`), frontend vanilla JS. Dependensi: `nodemailer` (hanya bila SMTP dikonfigurasi), `exceljs` dan `pdfkit` (untuk ekspor).
 
 ## Menjalankan
 
 ```bash
-npm install        # sekali, untuk nodemailer
+npm install        # sekali (nodemailer, exceljs, pdfkit)
 npm start          # http://localhost:3000  (PORT=... untuk mengganti port)
 npm run seed-demo  # opsional: 2 fakultas + akun contoh (hanya untuk mencoba)
 npm test           # tes backend (API, hak akses, login)
@@ -52,7 +52,18 @@ Saat database masih kosong, server membuat akun **super admin** (`ADMIN_USERNAME
 | Transaksi Keluar | Pemakaian, hibah keluar, transfer keluar (ditolak jika stok tidak cukup) |
 | Stok Opname | Bulanan (`YYYY-MM`) dan semester (`YYYY-S1`/`S2`); draft → isi stok fisik → finalisasi membuat transaksi penyesuaian otomatis |
 | Dashboard | Stok kosong, stok menipis (≤ minimum), nilai persediaan |
+| Ekspor | Excel (.xlsx) & PDF untuk stok (juga kosong/menipis), transaksi (rentang tanggal), kartu stok, lembar opname (dengan kolom tanda tangan), transfer, tren pemakaian, dan kode barang |
 | Laporan | Tren barang keluar per bulan, pemakaian terbanyak + perkiraan hari stok habis, kartu stok per barang |
+
+## Ekspor Excel & PDF
+
+Tombol **Excel / PDF** ada di Dashboard (stok kosong/menipis), Barang, Transaksi (dengan rentang tanggal), Transfer, Laporan (tren & kartu stok), Opname (lembar cetak), dan Kode Barang. Endpoint: `GET /api/ekspor/<stok|transaksi|kartu-stok|opname|transfer|tren|kode-barang>?format=xlsx|pdf` plus filter yang sama dengan layar.
+
+- Data diambil lewat API yang sama dengan layar, jadi **pembatasan unit dan hak akses otomatis berlaku** (unit lain → 404). Setiap unduhan tercatat di log audit.
+- Excel: judul & info, header ber-filter dan dibekukan, format angka/Rupiah/tanggal asli (bisa dijumlah), baris total berupa rumus `SUM`, siap cetak (lebar menyesuaikan halaman). Isian teks disimpan sebagai teks, bukan rumus.
+- PDF: A4 (landscape untuk tabel lebar), header tabel diulang tiap halaman, nomor halaman, pencetak & waktu; lembar opname memuat blok tanda tangan. Memakai font standar PDF, sehingga karakter di luar Latin-1 (mis. huruf non-Latin) diganti `?` di PDF (Excel tetap utuh).
+- Maksimal 20.000 baris transaksi per berkas (ada catatan bila terpotong).
+- Dependensi: `exceljs`, `pdfkit` (dimuat saat ekspor pertama).
 
 ## Referensi kode barang (gaya SAKTI)
 
@@ -73,7 +84,7 @@ Menu **Transfer** memindahkan barang antar fakultas dengan jejak yang tertaut (k
 3. Operator unit tujuan memetakan ke barang miliknya (satuan harus sama) atau membuat barang baru dengan kode/nama yang sama → *Diperiksa*.
 4. Approver unit tujuan menyetujui → stok tujuan bertambah (transaksi `transfer_masuk`, harga ikut dari asal) → *Selesai*.
 
-Approver tujuan dapat menolak setelah *Dikirim*: stok otomatis kembali ke unit asal. Selama di perjalanan barang tidak dihitung di unit mana pun. Kategori "Transfer" pada form transaksi biasa tetap ada untuk pihak di luar aplikasi. Saat ini jumlah diterima harus sama dengan jumlah dikirim (selisih ditangani dengan menolak lalu mengajukan ulang).
+Approver tujuan dapat menolak setelah *Dikirim*: stok otomatis kembali ke unit asal. Selama di perjalanan barang tidak dihitung di unit mana pun. Kategori "Transfer" pada form transaksi biasa tetap ada untuk pihak di luar aplikasi. **Penerimaan sebagian**: operator tujuan mengisi jumlah diterima (≤ dikirim) dan alasan selisih; saat approver tujuan menyetujui, jumlah diterima masuk ke tujuan dan selisihnya otomatis kembali ke stok unit asal (transaksi pengembalian tertaut). Jika barang memang hilang/rusak, unit asal menyesuaikannya lewat stok opname.
 
 ## Lupa password & SSO
 
@@ -92,7 +103,7 @@ Approver tujuan dapat menolak setelah *Dikirim*: stok otomatis kembali ke unit a
 
 ## Struktur
 
-`db.js` skema SQLite · `auth.js` password/sesi/login/reset · `oidc.js` SSO · `mail.js` email · `transfer.js` transfer antar-unit · `kodebarang.js` referensi kode barang · `app.js` logika bisnis, API & otorisasi · `server.js` HTTP, cookie, CSRF · `public/` UI · `test/` tes.
+`db.js` skema SQLite · `auth.js` password/sesi/login/reset · `oidc.js` SSO · `mail.js` email · `transfer.js` transfer antar-unit · `kodebarang.js` referensi kode barang · `export.js` Excel/PDF · `app.js` logika bisnis, API & otorisasi · `server.js` HTTP, cookie, CSRF · `public/` UI · `test/` tes.
 
 ## Keamanan
 
@@ -100,4 +111,4 @@ Password di-hash scrypt; sesi berupa token acak (hanya hash-nya disimpan) di coo
 
 ## Belum ada (langkah lanjutan yang disarankan)
 
-Penerimaan transfer sebagian (jumlah diterima ≠ dikirim), notifikasi email untuk antrean persetujuan, penyimpanan state SSO bersama untuk banyak instance, multi-gudang per unit, ekspor Excel/PDF, upload lampiran dokumen, batch/kedaluwarsa.
+Notifikasi email untuk antrean persetujuan, penyimpanan state SSO bersama untuk banyak instance, multi-gudang per unit, ekspor Excel/PDF, upload lampiran dokumen, batch/kedaluwarsa.

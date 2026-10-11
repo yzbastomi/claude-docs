@@ -123,7 +123,8 @@ export function createApi(db) {
     throw bad(tipe === 'SEMESTER' ? 'Periode semester berformat YYYY-S1 atau YYYY-S2' : 'Periode bulanan berformat YYYY-MM');
   }
   function opnameUntuk(user, id) {
-    const o = get(`SELECT o.*, u.kode AS unit_kode, u.nama AS unit_nama FROM opnames o JOIN units u ON u.id = o.unit_id WHERE o.id = ?`, Number(id));
+    const o = get(`SELECT o.*, u.kode AS unit_kode, u.nama AS unit_nama, c.nama AS pembuat, d.nama AS pemutus FROM opnames o JOIN units u ON u.id = o.unit_id
+                   LEFT JOIN users c ON c.id = o.dibuat_oleh LEFT JOIN users d ON d.id = o.diputuskan_oleh WHERE o.id = ?`, Number(id));
     if (!o || !dalamUnit(user, o.unit_id)) throw new HttpError(404, 'Opname tidak ditemukan');
     o.lines = all(`SELECT l.*, i.kode, i.nama, i.satuan,
         CASE WHEN l.stok_fisik IS NULL THEN NULL ELSE l.stok_fisik - l.stok_sistem END AS selisih
@@ -333,7 +334,7 @@ export function createApi(db) {
       if (query.item_id) { cond.push('t.item_id = ?'); p.push(Number(query.item_id)); }
       if (query.dari) { cond.push('t.tanggal >= ?'); p.push(query.dari); }
       if (query.sampai) { cond.push('t.tanggal <= ?'); p.push(query.sampai); }
-      const limit = Math.min(parseInt(query.limit, 10) || 200, 1000);
+      const limit = Math.min(parseInt(query.limit, 10) || 200, 20000);
       return all(`SELECT t.*, i.kode, i.nama, i.satuan, un.kode AS unit_kode, c.nama AS pembuat, d.nama AS pemutus
                   FROM transactions t JOIN items i ON i.id = t.item_id JOIN units un ON un.id = i.unit_id
                   LEFT JOIN users c ON c.id = t.dibuat_oleh LEFT JOIN users d ON d.id = t.diputuskan_oleh

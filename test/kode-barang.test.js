@@ -112,7 +112,21 @@ test('migrasi dari skema v3 menambah kolom kode_barang tanpa menghapus data', as
   awal.close();
   const db = openDb(f);
   assert.equal(db.prepare('SELECT nama, kode_barang FROM items').get().nama, 'Barang A');
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 4);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 5);
   db.prepare("INSERT INTO kode_barang(kode, level, uraian) VALUES ('1',1,'P')").run();
   assert.throws(() => db.prepare("INSERT INTO kode_barang(kode, level, uraian) VALUES ('12',2,'salah')").run(), /CHECK/);
+});
+
+test('migrasi v4 → v5 menambah kolom penerimaan sebagian pada transfer', async () => {
+  const { openDb } = await import('../db.js');
+  const { mkdtempSync } = await import('node:fs'); const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
+  const f = join(mkdtempSync(join(tmpdir(), 'mig-')), 'v4.db');
+  const awal = openDb(f);
+  awal.exec("INSERT INTO units(kode,nama) VALUES ('A','a'),('B','b'); INSERT INTO items(unit_id,kode,nama) VALUES (1,'X','x'); INSERT INTO transfers(unit_asal_id,unit_tujuan_id,item_asal_id,qty,tanggal,status) VALUES (1,2,1,5,'2026-01-01','DIPERIKSA')");
+  awal.exec('ALTER TABLE transfers DROP COLUMN qty_diterima; ALTER TABLE transfers DROP COLUMN catatan_penerimaan; PRAGMA user_version = 4');
+  awal.close();
+  const db = openDb(f);
+  const r = db.prepare('SELECT qty, qty_diterima, catatan_penerimaan FROM transfers').get();
+  assert.equal(r.qty, 5); assert.equal(r.qty_diterima, null); assert.equal(r.catatan_penerimaan, '');
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 5);
 });

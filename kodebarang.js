@@ -44,7 +44,7 @@ export function createKodeBarang(ctx) {
         c.push(`(k.uraian LIKE ? ESCAPE '\\' ${d ? "OR k.kode LIKE ? ESCAPE '\\'" : ''})`);
         p.push(`%${esc(q)}%`, ...(d ? [`${esc(d)}%`] : []));
       }
-      const limit = Math.min(parseInt(query.limit, 10) || 200, 500);
+      const limit = Math.min(parseInt(query.limit, 10) || 200, 50000);
       const rows = all(`SELECT k.*, (SELECT COUNT(*) FROM items WHERE kode_barang = k.kode) AS dipakai FROM kode_barang k
                         ${c.length ? 'WHERE ' + c.join(' AND ') : ''} ORDER BY k.kode LIMIT ${limit + 1}`, ...p);
       return { rows: rows.slice(0, limit), terpotong: rows.length > limit };

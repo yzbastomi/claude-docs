@@ -114,3 +114,51 @@ test('isolasi & peran: unit ketiga tidak melihat; super admin hanya baca; tujuan
   assert.equal(c.as(c.u.apFt)('GET', '/api/dashboard').transfer_perlu_tindakan, 0);
   assert.equal(c.as(c.u.apFeb)('GET', '/api/dashboard').transfer_perlu_tindakan, 1);
 });
+
+test('penerimaan sebagian: selisih wajib beralasan dan otomatis kembali ke unit asal saat disetujui', () => {
+  const { c, feb, apFeb, ft, apFt, ajukan, stok } = siap();
+  const t = ajukan(6); apFeb('POST', `/api/transfer/${t.id}/setujui`);
+  assert.equal(stok(feb, 'ATK-1'), 4);
+  assert.throws(() => ft('POST', `/api/transfer/${t.id}/terima`, { buat_item_baru: true, qty_diterima: 7 }), /paling banyak 6/);
+  assert.throws(() => ft('POST', `/api/transfer/${t.id}/terima`, { buat_item_baru: true, qty_diterima: 0 }), /lebih dari 0/);
+  assert.throws(() => ft('POST', `/api/transfer/${t.id}/terima`, { buat_item_baru: true, qty_diterima: 4 }), /Alasan selisih/);
+  assert.equal(ft('GET', `/api/transfer/${t.id}`).status, 'DIKIRIM', 'gagal tidak mengubah apa pun');
+  assert.equal(ft('GET', '/api/items').length, 0, 'barang baru tidak terbentuk saat validasi gagal');
+
+  const p = ft('POST', `/api/transfer/${t.id}/terima`, { buat_item_baru: true, qty_diterima: 4, catatan: '2 rim basah' });
+  assert.equal(p.status, 'DIPERIKSA'); assert.equal(p.qty_diterima, 4); assert.equal(p.catatan_penerimaan, '2 rim basah');
+  assert.equal(stok(feb, 'ATK-1'), 4, 'belum ada perubahan sebelum disetujui');
+  assert.equal(apFt('POST', `/api/transfer/${t.id}/setujui`).status, 'DITERIMA');
+  assert.equal(stok(ft, 'ATK-1'), 4);
+  assert.equal(stok(feb, 'ATK-1'), 6, '4 + 2 kembali');
+  const kembali = feb('GET', '/api/transaksi').find((x) => /Pengembalian selisih/.test(x.keterangan));
+  assert.equal(kembali.qty, 2); assert.equal(kembali.harga_satuan, 40000); assert.equal(kembali.transfer_id, t.id); assert.match(kembali.keterangan, /2 rim basah/);
+  assert.equal(ft('GET', '/api/transaksi')[0].qty, 4);
+  // total nilai konservasi: FEB 6 + FT 4 = 10 rim
+});
+
+test('penerimaan penuh tetap seperti semula; operator dapat mengoreksi jumlah sebelum disetujui; tolak mengembalikan semuanya', () => {
+  const { feb, apFeb, ft, apFt, ajukan, stok } = siap();
+  const a = ajukan(5); apFeb('POST', `/api/transfer/${a.id}/setujui`);
+  ft('POST', `/api/transfer/${a.id}/terima`, { buat_item_baru: true, qty_diterima: 3, catatan: 'kurang' });
+  const koreksi = ft('POST', `/api/transfer/${a.id}/terima`, { item_id: ft('GET', '/api/items')[0].id, qty_diterima: '5' });
+  assert.equal(koreksi.qty_diterima, 5); assert.equal(koreksi.catatan_penerimaan, '', 'catatan dibersihkan bila penuh');
+  apFt('POST', `/api/transfer/${a.id}/setujui`);
+  assert.equal(stok(ft, 'ATK-1'), 5); assert.equal(stok(feb, 'ATK-1'), 5);
+  assert.equal(feb('GET', '/api/transaksi').filter((x) => /Pengembalian/.test(x.keterangan)).length, 0);
+
+  const b = ajukan(5); apFeb('POST', `/api/transfer/${b.id}/setujui`);
+  ft('POST', `/api/transfer/${b.id}/terima`, { item_id: ft('GET', '/api/items')[0].id, qty_diterima: 2, catatan: 'rusak' });
+  apFt('POST', `/api/transfer/${b.id}/tolak`, { catatan: 'Tolak semua' });
+  assert.equal(stok(feb, 'ATK-1'), 5, 'seluruh 5 kembali, bukan hanya selisih');
+  assert.equal(stok(ft, 'ATK-1'), 5);
+});
+
+test('data transfer lama (qty_diterima NULL) diperlakukan sebagai diterima penuh', () => {
+  const { c, apFeb, ft, apFt, ajukan, stok } = siap();
+  const t = ajukan(3); apFeb('POST', `/api/transfer/${t.id}/setujui`);
+  ft('POST', `/api/transfer/${t.id}/terima`, { buat_item_baru: true });
+  c.db.prepare('UPDATE transfers SET qty_diterima = NULL WHERE id = ?').run(t.id);
+  apFt('POST', `/api/transfer/${t.id}/setujui`);
+  assert.equal(stok(ft, 'ATK-1'), 3);
+});

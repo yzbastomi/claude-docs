@@ -49,6 +49,33 @@ function barChart(series, key = 'qty') {
     }).join('')}</svg>`;
 }
 
+// ---------- Ekspor Excel / PDF ----------
+// Tombol ekspor; input [data-p] di dalamnya (mis. rentang tanggal) ikut dikirim sebagai parameter.
+function eksporBtn(nama, params = {}, { rentang = false } = {}) {
+  const q = new URLSearchParams(params);
+  if (isSA() && state.unit && !q.has('unit_id')) q.set('unit_id', state.unit);
+  const tgl = rentang ? `<label class="inl">Dari <input type="date" data-p="dari"></label><label class="inl">Sampai <input type="date" data-p="sampai"></label>` : '';
+  return `<span class="ekspor" data-nama="${nama}" data-q="${esc(q.toString())}">${tgl}<span class="muted">Ekspor:</span>
+    <button type="button" class="sec" data-fmt="xlsx">Excel</button><button type="button" class="sec" data-fmt="pdf">PDF</button></span>`;
+}
+document.addEventListener('click', guard(async (e) => {
+  const b = e.target.closest('.ekspor [data-fmt]');
+  if (!b) return;
+  const box = b.closest('.ekspor'), q = new URLSearchParams(box.dataset.q);
+  box.querySelectorAll('[data-p]').forEach((i) => i.value && q.set(i.dataset.p, i.value));
+  q.set('format', b.dataset.fmt);
+  const teks = b.textContent; b.disabled = true; b.textContent = '…';
+  try {
+    const r = await fetch(`/api/ekspor/${box.dataset.nama}?${q}`);
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Ekspor gagal');
+    const nama = (r.headers.get('content-disposition') || '').match(/filename="([^"]+)"/)?.[1] || `${box.dataset.nama}.${b.dataset.fmt}`;
+    const url = URL.createObjectURL(await r.blob());
+    const a = Object.assign(document.createElement('a'), { href: url, download: nama });
+    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
+    toast(`${nama} diunduh`);
+  } finally { b.disabled = false; b.textContent = teks; }
+}));
+
 // ---------- Login / sesi ----------
 const guest = (html) => { $('#hdr').hidden = true; $('#view').innerHTML = `<div class="card login">${html}</div>`; };
 let config = null;
@@ -148,8 +175,8 @@ const views = {
       <div class="stat"><b>${d.transaksi_bulan_ini}</b><span>Transaksi disetujui bulan ini</span></div>
       <div class="stat"><b style="color:var(--warn)">${d.menunggu_transaksi + d.menunggu_opname}</b><span>Transaksi/opname menunggu persetujuan${isAP() ? ' — <a href="#persetujuan">buka</a>' : ''}</span></div>
       <div class="stat"><b style="color:var(--warn)">${d.transfer_perlu_tindakan}</b><span>Transfer perlu tindakan — <a href="#transfer">buka</a></span></div></div>
-      <div class="card"><h2>Stok kosong</h2>${list(d.kosong)}</div>
-      <div class="card"><h2>Stok menipis (≤ minimum)</h2>${list(d.menipis)}</div>`;
+      <div class="card"><div class="tb"><h2>Stok kosong</h2>${eksporBtn('stok', { status: 'KOSONG' })}</div>${list(d.kosong)}</div>
+      <div class="card"><div class="tb"><h2>Stok menipis (≤ minimum)</h2>${eksporBtn('stok', { status: 'MENIPIS' })}</div>${list(d.menipis)}</div>`;
   },
 
   async barang(el) {
@@ -162,7 +189,7 @@ const views = {
         <label>Stok minimum<input name="stok_minimum" type="number" min="0" step="any" value="0"></label>
         <label>Status<select name="aktif"><option value="1">Aktif</option><option value="0">Nonaktif</option></select></label>
         <div><button>Simpan</button> <button type="button" class="sec" id="reset">Batal</button></div></form></div>` : '';
-    el.innerHTML = `${form}<div class="card"><h2>Daftar barang</h2>${table([...(isSA() ? ['Unit'] : []), 'Kode', 'Nama', 'Kode Barang', 'Kategori', 'Satuan', '#Stok', '#Min', '#Harga rata-rata', 'Status', ...(isOP() ? [''] : [])], items.map((i) =>
+    el.innerHTML = `${form}<div class="card"><div class="tb"><h2>Daftar barang</h2>${eksporBtn('stok')}</div>${table([...(isSA() ? ['Unit'] : []), 'Kode', 'Nama', 'Kode Barang', 'Kategori', 'Satuan', '#Stok', '#Min', '#Harga rata-rata', 'Status', ...(isOP() ? [''] : [])], items.map((i) =>
         `<tr style="${i.aktif ? '' : 'opacity:.5'}">${isSA() ? `<td>${esc(i.unit_kode)}</td>` : ''}<td>${esc(i.kode)}</td><td>${esc(i.nama)}</td><td title="${esc(i.kode_barang_uraian ?? '')}">${i.kode_barang ? esc(fmtKode(i.kode_barang)) : '—'}</td><td>${esc(i.kategori)}</td><td>${esc(i.satuan)}</td>
         <td class="n">${fmt(i.stok)}</td><td class="n">${fmt(i.stok_minimum)}</td><td class="n">${rp(i.harga_rata)}</td><td>${badge(i.status)}</td>
         ${isOP() ? `<td><button class="sec" data-edit="${i.id}">Ubah</button> <button class="del" data-del="${i.id}">Hapus</button></td>` : ''}</tr>`))}</div>`;
@@ -250,11 +277,11 @@ const views = {
         ${['hibah_keluar', 'transfer_keluar'].map((k) => `<option value="${k}">${LABEL[k]}</option>`).join('')}</select></label>
       <label>Rentang<select name="bulan">${[6, 12, 24].map((n) => `<option value="${n}">${n} bulan</option>`).join('')}</select></label>
       <button>Terapkan</button></form>
-      <h2>Tren barang keluar per bulan (kuantitas)</h2>${barChart(t.series)}</div>
+      <div class="tb"><h2>Tren barang keluar per bulan (kuantitas)</h2>${eksporBtn('tren', { bulan, kategori: kat, ...(item ? { item_id: item } : {}) })}</div>${barChart(t.series)}</div>
       <div class="card"><h2>Pemakaian terbanyak & perkiraan sisa stok (90 hari terakhir)</h2>${table([...(isSA() ? ['Unit'] : []), 'Kode', 'Barang', '#Pemakaian 90 hr', '#Rata-rata/bulan', '#Stok', '#Perkiraan habis dalam', 'Status'], t.top.map((i) =>
         `<tr>${isSA() ? `<td>${esc(i.unit_kode)}</td>` : ''}<td>${esc(i.kode)}</td><td>${esc(i.nama)}</td><td class="n">${fmt(i.pemakaian_90_hari)}</td><td class="n">${fmt(i.rata_per_bulan)}</td>
         <td class="n">${fmt(i.stok)} ${esc(i.satuan)}</td><td class="n">${i.sisa_hari == null ? '—' : fmt(i.sisa_hari, 0) + ' hari'}</td><td>${badge(i.status)}</td></tr>`))}</div>
-      ${kartu ? `<div class="card"><h2>Kartu stok: ${esc(kartu.item.nama)}</h2>${table(['Tanggal', 'Kategori', 'Dokumen', '#Masuk', '#Keluar', '#Saldo'], kartu.rows.map((r) =>
+      ${kartu ? `<div class="card"><div class="tb"><h2>Kartu stok: ${esc(kartu.item.nama)}</h2>${eksporBtn('kartu-stok', { item_id: item })}</div>${table(['Tanggal', 'Kategori', 'Dokumen', '#Masuk', '#Keluar', '#Saldo'], kartu.rows.map((r) =>
         `<tr><td>${r.tanggal}</td><td>${LABEL[r.kategori]}</td><td>${esc(r.no_dokumen)}</td><td class="n">${r.jenis === 'MASUK' ? fmt(r.qty) : ''}</td><td class="n">${r.jenis === 'KELUAR' ? fmt(r.qty) : ''}</td><td class="n">${fmt(r.saldo)}</td></tr>`))}</div>` : ''}`;
     const f = $('#f'); f.kat.value = kat; f.bulan.value = bulan;
     f.onsubmit = (e) => { e.preventDefault(); const d = formData(f); location.hash = `#laporan?item=${d.item}&kat=${d.kat}&bulan=${d.bulan}`; };
@@ -321,7 +348,7 @@ views.kodebarang = async (el) => {
     <div class="card"><h2>Impor massal</h2>
     <p class="muted">Tempel baris <code>kode;uraian</code> (pemisah titik-koma, koma, tab, atau spasi; baris header boleh). Urutan bebas, induk boleh ada di dalam berkas yang sama. Kode yang sudah ada dilewati. Jika ada satu baris salah, tidak ada yang disimpan.</p>
     <form id="fi"><textarea name="teks" rows="6" style="width:100%" placeholder="1;Persediaan&#10;101;…&#10;10101;…"></textarea><div class="bar"><button>Impor</button></div></form></div>
-    <div class="card"><h2>Daftar kode barang</h2>
+    <div class="card"><div class="tb"><h2>Daftar kode barang</h2>${eksporBtn('kode-barang')}</div>
     <form class="bar" id="ff"><label>Cari kode / uraian<input name="q"></label>
       <label>Tingkat<select name="level"><option value="">Semua</option>${NAMA_LEVEL.map((n, i) => `<option value="${i + 1}">${i + 1} — ${n}</option>`).join('')}</select></label><button>Cari</button></form>
     <div id="daftar"></div></div>`;
@@ -368,12 +395,13 @@ function transferTable(rows, myItems) {
     if (t.aksi.includes('tolak')) aksi.push(`<button class="no" data-tr="${t.id}" data-do="tolak">Tolak</button>`);
     if (t.aksi.includes('terima')) {
       const cocok = myItems.filter((i) => i.aktif && i.satuan.toLowerCase() === t.satuan.toLowerCase());
-      aksi.push(`<select data-map="${t.id}"><option value="">Petakan ke barang…</option>${cocok.map((i) => `<option value="${i.id}" ${i.id == t.item_tujuan_id ? 'selected' : ''}>${esc(i.kode)} — ${esc(i.nama)}</option>`).join('')}</select>
+      aksi.push(`<label class="inl">Diterima <input type="number" data-qty="${t.id}" min="0" max="${t.qty}" step="any" value="${t.qty_diterima ?? t.qty}"> ${esc(t.satuan)}</label>
+        <select data-map="${t.id}"><option value="">Petakan ke barang…</option>${cocok.map((i) => `<option value="${i.id}" ${i.id == t.item_tujuan_id ? 'selected' : ''}>${esc(i.kode)} — ${esc(i.nama)}</option>`).join('')}</select>
         <button data-tr="${t.id}" data-do="terima-map">Terima</button> <button class="sec" data-tr="${t.id}" data-do="terima-baru">Buat barang baru</button>`);
     }
     return `<tr><td>${t.id}</td><td>${t.tanggal}</td><td>${esc(t.unit_asal_kode)}</td><td>${esc(t.unit_tujuan_kode)}</td><td>${esc(t.item_asal_kode)} — ${esc(t.item_asal_nama)}</td>
-      <td class="n">${fmt(t.qty)} ${esc(t.satuan)}</td><td>${t.item_tujuan_kode ? esc(t.item_tujuan_kode) + ' — ' + esc(t.item_tujuan_nama) : '—'}</td>
-      <td>${trBadge(t.status)}${t.catatan_keputusan ? `<div class="muted" style="font-size:12px">${esc(t.catatan_keputusan)}</div>` : ''}</td><td style="white-space:normal">${aksi.join(' ')}</td></tr>`;
+      <td class="n">${fmt(t.qty)} ${esc(t.satuan)}${t.qty_diterima != null && t.qty_diterima !== t.qty && ['DIPERIKSA', 'DITERIMA'].includes(t.status) ? `<div class="muted" style="font-size:12px">diterima ${fmt(t.qty_diterima)}</div>` : ''}</td><td>${t.item_tujuan_kode ? esc(t.item_tujuan_kode) + ' — ' + esc(t.item_tujuan_nama) : '—'}</td>
+      <td>${trBadge(t.status)}${t.catatan_keputusan ? `<div class="muted" style="font-size:12px">${esc(t.catatan_keputusan)}</div>` : ''}${t.catatan_penerimaan ? `<div class="muted" style="font-size:12px">Selisih: ${esc(t.catatan_penerimaan)}</div>` : ''}</td><td style="white-space:normal">${aksi.join(' ')}</td></tr>`;
   }));
 }
 // Menangani klik tombol transfer; true bila ditangani
@@ -384,11 +412,24 @@ async function transferClick(e) {
   if (d === 'batal') { if (confirm('Batalkan transfer ini?')) await post('batal', {}, 'Transfer dibatalkan'); }
   else if (d === 'setujui') await post('setujui', {}, 'Transfer disetujui');
   else if (d === 'tolak') { const catatan = prompt('Alasan penolakan:'); if (catatan) await post('tolak', { catatan }, 'Transfer ditolak'); }
-  else if (d === 'terima-map') {
-    const item_id = document.querySelector(`select[data-map="${id}"]`).value;
-    if (!item_id) throw new Error('Pilih barang di unit Anda, atau gunakan "Buat barang baru"');
-    await post('terima', { item_id }, 'Penerimaan dicatat, menunggu persetujuan approver');
-  } else if (d === 'terima-baru') { if (confirm('Buat barang baru di unit Anda dengan kode dan nama yang sama?')) await post('terima', { buat_item_baru: true }, 'Penerimaan dicatat, menunggu persetujuan approver'); }
+  else if (d === 'terima-map' || d === 'terima-baru') {
+    const qi = document.querySelector(`input[data-qty="${id}"]`);
+    const body = { qty_diterima: qi.value };
+    if (!(Number(qi.value) > 0)) throw new Error('Jumlah diterima harus lebih dari 0');
+    if (Number(qi.value) < Number(qi.max)) { // penerimaan sebagian: wajib alasan, sisanya kembali ke unit asal
+      const alasan = prompt(`Diterima ${qi.value} dari ${qi.max}. Sisa ${fmt(qi.max - qi.value)} akan kembali ke unit pengirim.\nAlasan selisih:`);
+      if (!alasan) return true;
+      body.catatan = alasan;
+    }
+    if (d === 'terima-map') {
+      body.item_id = document.querySelector(`select[data-map="${id}"]`).value;
+      if (!body.item_id) throw new Error('Pilih barang di unit Anda, atau gunakan "Buat barang baru"');
+    } else {
+      if (!confirm('Buat barang baru di unit Anda dengan kode dan nama yang sama?')) return true;
+      body.buat_item_baru = true;
+    }
+    await post('terima', body, 'Penerimaan dicatat, menunggu persetujuan approver');
+  }
   return true;
 }
 
@@ -401,7 +442,7 @@ views.transfer = async (el) => {
     <label>Jumlah<input type="number" name="qty" min="0.0001" step="any" required></label>
     <label>No. dokumen<input name="no_dokumen"></label><label>Keterangan<input name="keterangan"></label><div><button>Ajukan</button></div></form>
     <p class="muted">Alur: approver unit Anda menyetujui (stok Anda berkurang) → operator unit tujuan memetakan barang → approver unit tujuan menyetujui (stok tujuan bertambah). Jika ditolak tujuan, stok kembali ke unit Anda.</p></div>` : '';
-  el.innerHTML = `${form}<div class="card"><h2>Transfer antar-unit</h2>${transferTable(rows, items)}</div>`;
+  el.innerHTML = `${form}<div class="card"><div class="tb"><h2>Transfer antar-unit</h2>${eksporBtn('transfer')}</div>${transferTable(rows, items)}</div>`;
   if (isOP()) $('#f').onsubmit = guard(async (e) => { e.preventDefault(); await api('POST', '/api/transfer', formData(e.target)); toast('Transfer diajukan'); render(); });
   el.onclick = guard(transferClick);
 };
@@ -418,7 +459,7 @@ async function transaksi(el, jenis, kategori) {
     <label>${PIHAK[jenis]}<input name="pihak"></label><label>No. dokumen<input name="no_dokumen"></label>
     <label>Keterangan<input name="keterangan"></label><div><button>Ajukan</button></div></form>
     <p class="muted">Untuk perpindahan antar-unit di aplikasi ini gunakan menu <a href="#transfer">Transfer</a>. Transaksi berstatus <b>Menunggu</b> dan baru memengaruhi stok setelah disetujui approver unit.${hasPrice ? ' Isi harga 0 untuk hibah/transfer bila tidak ada nilai.' : ' Nilai pemakaian dihitung dari harga rata-rata saat disetujui.'}</p></div>` : '';
-  el.innerHTML = `${form}<div class="card"><h2>100 transaksi terakhir</h2>${table([...(isSA() ? ['Unit'] : []), 'Tanggal', 'Kategori', 'Barang', '#Jumlah', hasPrice ? '#Harga' : '#Nilai', 'Pihak', 'Dokumen', 'Status', ...(isOP() ? [''] : [])], rows.map((t) =>
+  el.innerHTML = `${form}<div class="card"><div class="tb"><h2>100 transaksi terakhir</h2>${eksporBtn('transaksi', { jenis }, { rentang: true })}</div>${table([...(isSA() ? ['Unit'] : []), 'Tanggal', 'Kategori', 'Barang', '#Jumlah', hasPrice ? '#Harga' : '#Nilai', 'Pihak', 'Dokumen', 'Status', ...(isOP() ? [''] : [])], rows.map((t) =>
       `<tr>${isSA() ? `<td>${esc(t.unit_kode)}</td>` : ''}<td>${t.tanggal}</td><td>${LABEL[t.kategori]}</td><td>${esc(t.kode)} — ${esc(t.nama)}</td><td class="n">${fmt(t.qty)} ${esc(t.satuan)}</td>
       <td class="n">${t.status === 'MENUNGGU' && !hasPrice ? '—' : rp(hasPrice ? t.harga_satuan : t.harga_satuan * t.qty)}</td><td>${esc(t.pihak)}</td><td>${esc(t.no_dokumen)}${t.transfer_id ? ` <a href="#transfer">TRF#${t.transfer_id}</a>` : ''}</td>
       <td>${badge(t.status)}${t.status === 'DITOLAK' ? `<div class="muted" style="font-size:12px">${esc(t.catatan_keputusan)}</div>` : ''}</td>
@@ -436,7 +477,7 @@ async function opnameDetail(el, id) {
   const o = await api('GET', `/api/opname/${id}`);
   const edit = isOP() && o.status === 'DRAFT';
   const info = { DRAFT: 'Isi stok fisik hasil hitung, lalu ajukan ke approver.', DIAJUKAN: 'Menunggu keputusan approver. Finalisasi akan membuat transaksi penyesuaian untuk setiap selisih.', FINAL: 'Opname final; selisih sudah dicatat sebagai transaksi penyesuaian.' }[o.status];
-  el.innerHTML = `<div class="card"><h2>Opname ${o.tipe.toLowerCase()} ${esc(o.periode)} · ${esc(o.unit_kode)} ${badge(o.status)}</h2>
+  el.innerHTML = `<div class="card"><div class="tb"><h2>Opname ${o.tipe.toLowerCase()} ${esc(o.periode)} · ${esc(o.unit_kode)} ${badge(o.status)}</h2>${eksporBtn('opname', { id })}</div>
     <p class="muted">Tanggal ${o.tanggal}. ${info}</p>
     ${o.catatan_keputusan && o.status === 'DRAFT' ? `<div class="note">Dikembalikan approver: ${esc(o.catatan_keputusan)}</div>` : ''}
     <form id="f">${table(['Kode', 'Barang', '#Stok sistem', '#Stok fisik', '#Selisih', 'Keterangan'], o.lines.map((l) =>

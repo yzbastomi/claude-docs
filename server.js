@@ -107,6 +107,21 @@ export function createApp(db = openDb(), opts = {}) {
           auth.ubahPassword(user, body.password_lama, body.password_baru);
           return send(200, { ok: true });
         }
+        if (req.method === 'GET' && url.pathname.startsWith('/api/ekspor/')) {
+          const ex = await import('./export.js'); // dimuat saat pertama dipakai (exceljs & pdfkit cukup besar)
+          const nama = url.pathname.slice('/api/ekspor/'.length);
+          const format = url.searchParams.get('format') === 'pdf' ? 'pdf' : 'xlsx';
+          const ds = ex.susunData(nama, api, Object.fromEntries(url.searchParams), user);
+          const opsi = { dicetakOleh: ex.penanda(user) };
+          const buf = format === 'pdf' ? await ex.toPdf(ds, opsi) : await ex.toXlsx(ds, opsi);
+          auth.audit(user.id, 'ekspor', `${nama}.${format}`);
+          res.writeHead(200, {
+            'Content-Type': format === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'Content-Disposition': `attachment; filename="${ex.NAMA_FILE(ds, user, format)}"`,
+            'Content-Length': buf.length, 'Cache-Control': 'no-store', ...HEADERS,
+          });
+          return res.end(buf);
+        }
         const out = api(req.method, url.pathname, Object.fromEntries(url.searchParams), body, user);
         return Array.isArray(out) && typeof out[0] === 'number' ? send(out[0], out[1]) : send(200, out);
       }

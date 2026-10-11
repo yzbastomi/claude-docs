@@ -1,10 +1,11 @@
 // Transfer barang antar unit yang tertaut ke dua transaksi (keluar di asal, masuk di tujuan).
 //
-//  DIAJUKAN ──approver asal──▶ DIKIRIM ──operator tujuan (petakan barang)──▶ DIPERIKSA ──approver tujuan──▶ DITERIMA
+//  DIAJUKAN ──approver asal──▶ DIKIRIM ──operator tujuan (petakan barang, jumlah diterima)──▶ DIPERIKSA ──approver tujuan──▶ DITERIMA
 //     │ tolak / batal              │ tolak (approver tujuan)                      │ tolak (approver tujuan)
 //     ▼                            ▼                                              ▼
 //  DITOLAK_ASAL / DIBATALKAN     DIKEMBALIKAN (stok kembali ke unit asal)    DIKEMBALIKAN
 //
+// Penerimaan sebagian: jika jumlah diterima < jumlah dikirim, selisihnya otomatis kembali ke stok unit asal saat DITERIMA.
 // Stok asal berkurang saat DIKIRIM; stok tujuan bertambah saat DITERIMA. Selama di perjalanan,
 // barang tidak dihitung di unit mana pun.
 const SA = 'SUPER_ADMIN', OP = 'OPERATOR', AP = 'APPROVER';
@@ -85,6 +86,10 @@ export function transferRoutes(ctx) {
         audit(user, 'transfer_batal', `#${t.id}`);
       } else if (aksi === 'terima') {
         const asal = get('SELECT * FROM items WHERE id = ?', t.item_asal_id);
+        const diterima = body.qty_diterima == null || body.qty_diterima === '' ? t.qty : num(body.qty_diterima, 'Jumlah diterima');
+        if (!(diterima > 0) || diterima > t.qty + 1e-9) throw bad(`Jumlah diterima harus lebih dari 0 dan paling banyak ${t.qty}`);
+        const qtyTerima = Math.abs(diterima - t.qty) < 1e-9 ? t.qty : diterima;
+        if (qtyTerima < t.qty && !catatan) throw bad('Alasan selisih penerimaan wajib diisi (isi catatan)');
         let tujuanId;
         if (body.buat_item_baru) {
           if (get('SELECT 1 FROM items WHERE unit_id = ? AND kode = ?', user.unit_id, asal.kode))
@@ -99,9 +104,9 @@ export function transferRoutes(ctx) {
           if (body.buat_item_baru)
             tujuanId = Number(run('INSERT INTO items (unit_id, kode, nama, kategori, satuan, stok_minimum, kode_barang) VALUES (?,?,?,?,?,0,?)',
               user.unit_id, asal.kode, asal.nama, asal.kategori, asal.satuan, asal.kode_barang).lastInsertRowid);
-          setStatus(t.id, 'DIPERIKSA', ', item_tujuan_id = ?, diterima_oleh = ?', tujuanId, user.id);
+          setStatus(t.id, 'DIPERIKSA', ', item_tujuan_id = ?, diterima_oleh = ?, qty_diterima = ?, catatan_penerimaan = ?', tujuanId, user.id, qtyTerima, qtyTerima < t.qty ? catatan : '');
         });
-        audit(user, 'transfer_terima', `#${t.id}`);
+        audit(user, 'transfer_terima', `#${t.id} ${qtyTerima}/${t.qty}`);
       } else if (aksi === 'setujui') {
         if (t.status === 'DIAJUKAN') {
           tx(() => {
@@ -116,11 +121,18 @@ export function transferRoutes(ctx) {
           });
           audit(user, 'transfer_kirim', `#${t.id}`);
         } else { // DIPERIKSA: approver tujuan
+          const diterima = t.qty_diterima ?? t.qty, selisih = t.qty - diterima; // NULL = data sebelum fitur sebagian
           tx(() => {
             insertTx({
-              tanggal: today(), jenis: 'MASUK', kategori: 'transfer_masuk', item_id: t.item_tujuan_id, qty: t.qty, harga_satuan: t.harga_satuan,
+              tanggal: today(), jenis: 'MASUK', kategori: 'transfer_masuk', item_id: t.item_tujuan_id, qty: diterima, harga_satuan: t.harga_satuan,
               pihak: t.unit_asal_nama, no_dokumen: t.no_dokumen, keterangan: `Transfer #${t.id} dari ${t.unit_asal_kode}`,
             }, { status: 'DISETUJUI', dibuat_oleh: t.diterima_oleh, diputuskan_oleh: user.id, transfer_id: t.id });
+            if (selisih > 1e-9) // sisa yang tidak diterima kembali ke unit asal
+              insertTx({
+                tanggal: today(), jenis: 'MASUK', kategori: 'transfer_masuk', item_id: t.item_asal_id, qty: selisih, harga_satuan: t.harga_satuan,
+                pihak: t.unit_tujuan_nama, no_dokumen: t.no_dokumen,
+                keterangan: `Pengembalian selisih transfer #${t.id} (diterima ${diterima} dari ${t.qty}): ${t.catatan_penerimaan}`,
+              }, { status: 'DISETUJUI', dibuat_oleh: t.dibuat_oleh, diputuskan_oleh: user.id, transfer_id: t.id });
             setStatus(t.id, 'DITERIMA', ', disetujui_tujuan_oleh = ?', user.id);
           });
           audit(user, 'transfer_diterima', `#${t.id}`);

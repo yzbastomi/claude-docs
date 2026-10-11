@@ -15,7 +15,7 @@ export const KATEGORI = {
   penyesuaian_keluar: 'KELUAR', // dibuat otomatis oleh stok opname
 };
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -29,6 +29,9 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
     if (!has('users', 'email')) db.exec('ALTER TABLE users ADD COLUMN email TEXT');
     if (!has('transactions', 'transfer_id')) db.exec('ALTER TABLE transactions ADD COLUMN transfer_id INTEGER');
     if (!has('items', 'kode_barang')) db.exec('ALTER TABLE items ADD COLUMN kode_barang TEXT');
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'transfers'").get() && !has('transfers', 'qty_diterima')) { // v5: penerimaan sebagian
+      db.exec("ALTER TABLE transfers ADD COLUMN qty_diterima REAL; ALTER TABLE transfers ADD COLUMN catatan_penerimaan TEXT NOT NULL DEFAULT ''");
+    }
   }
   db.exec(`
     PRAGMA foreign_keys = ON;
@@ -128,6 +131,8 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
       status TEXT NOT NULL DEFAULT 'DIAJUKAN' CHECK (status IN
         ('DIAJUKAN','DIKIRIM','DIPERIKSA','DITERIMA','DITOLAK_ASAL','DIKEMBALIKAN','DIBATALKAN')),
       catatan_keputusan TEXT NOT NULL DEFAULT '',
+      qty_diterima REAL,                             -- diisi operator tujuan; NULL/sama dengan qty = diterima penuh
+      catatan_penerimaan TEXT NOT NULL DEFAULT '',   -- alasan bila qty_diterima < qty
       dibuat_oleh INTEGER REFERENCES users(id),
       disetujui_asal_oleh INTEGER REFERENCES users(id),
       diterima_oleh INTEGER REFERENCES users(id),
