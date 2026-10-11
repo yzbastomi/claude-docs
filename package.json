@@ -7,6 +7,7 @@
   "engines": { "node": ">=22.13" },
   "scripts": {
     "start": "node server.js",
+    "seed-demo": "node seed-demo.js",
     "test": "node --test test/*.test.js"
   }
 }

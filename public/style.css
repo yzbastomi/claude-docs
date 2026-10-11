@@ -32,3 +32,12 @@ button.del{background:transparent;color:var(--bad);border:1px solid var(--line);
 #toast.show{opacity:1}#toast.err{background:var(--bad);color:#fff}
 svg.chart{width:100%;height:220px}
 svg.chart text{fill:var(--mut);font-size:11px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.top h1{margin:0}.who{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.who a{color:var(--fg);text-decoration:none;font-size:14px}
+[hidden]{display:none!important}
+nav{margin-top:8px}
+.MENUNGGU,.DIAJUKAN{background:#fef0c7;color:var(--warn)}.DISETUJUI{background:#d1fadf;color:var(--ok)}.DITOLAK{background:#fee4e2;color:var(--bad)}
+.login{max-width:360px;margin:12vh auto}.login form{display:grid;gap:12px}
+.err{color:var(--bad);min-height:1.4em;font-size:14px}
+.note{border-left:3px solid var(--warn);padding:6px 10px;background:var(--bg);margin:8px 0;font-size:14px}
+button.ok{background:var(--ok)}button.no{background:var(--bad)}

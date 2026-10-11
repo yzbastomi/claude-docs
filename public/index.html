@@ -8,16 +8,16 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header>
-  <h1>Stok Gudang</h1>
-  <nav id="nav">
-    <a href="#dashboard">Dashboard</a>
-    <a href="#barang">Barang</a>
-    <a href="#masuk">Transaksi Masuk</a>
-    <a href="#keluar">Transaksi Keluar</a>
-    <a href="#opname">Stok Opname</a>
-    <a href="#laporan">Laporan</a>
-  </nav>
+<header id="hdr" hidden>
+  <div class="top">
+    <h1>Stok Gudang</h1>
+    <div class="who">
+      <select id="unitfilter" title="Filter unit" hidden></select>
+      <a href="#akun" id="me"></a>
+      <button class="sec" id="logout">Keluar</button>
+    </div>
+  </div>
+  <nav id="nav"></nav>
 </header>
 <main id="view"></main>
 <div id="toast" role="status"></div>
