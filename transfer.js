@@ -97,8 +97,8 @@ export function transferRoutes(ctx) {
         }
         tx(() => {
           if (body.buat_item_baru)
-            tujuanId = Number(run('INSERT INTO items (unit_id, kode, nama, kategori, satuan, stok_minimum) VALUES (?,?,?,?,?,0)',
-              user.unit_id, asal.kode, asal.nama, asal.kategori, asal.satuan).lastInsertRowid);
+            tujuanId = Number(run('INSERT INTO items (unit_id, kode, nama, kategori, satuan, stok_minimum, kode_barang) VALUES (?,?,?,?,?,0,?)',
+              user.unit_id, asal.kode, asal.nama, asal.kategori, asal.satuan, asal.kode_barang).lastInsertRowid);
           setStatus(t.id, 'DIPERIKSA', ', item_tujuan_id = ?, diterima_oleh = ?', tujuanId, user.id);
         });
         audit(user, 'transfer_terima', `#${t.id}`);

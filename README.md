@@ -46,12 +46,23 @@ Saat database masih kosong, server membuat akun **super admin** (`ADMIN_USERNAME
 | Modul | Isi |
 |---|---|
 | Barang | Kode, nama, kategori, satuan, stok minimum, aktif/nonaktif |
+| Kode Barang (super admin) | Referensi kode barang persediaan 10 digit gaya SAKTI, pohon 5 tingkat, tambah satuan atau impor massal |
 | Persetujuan | Antrian transaksi & opname untuk approver unit |
 | Transaksi Masuk | Pembelian, hibah masuk, transfer masuk, perolehan lainnya |
 | Transaksi Keluar | Pemakaian, hibah keluar, transfer keluar (ditolak jika stok tidak cukup) |
 | Stok Opname | Bulanan (`YYYY-MM`) dan semester (`YYYY-S1`/`S2`); draft → isi stok fisik → finalisasi membuat transaksi penyesuaian otomatis |
 | Dashboard | Stok kosong, stok menipis (≤ minimum), nilai persediaan |
 | Laporan | Tren barang keluar per bulan, pemakaian terbanyak + perkiraan hari stok habis, kartu stok per barang |
+
+## Referensi kode barang (gaya SAKTI)
+
+Menu **Kode Barang** (khusus super admin) menyimpan referensi kodefikasi BMN persediaan: 10 digit `X.XX.XX.XX.XXX` = Golongan(1) · Bidang(2) · Kelompok(2) · Sub Kelompok(2) · Sub-sub Kelompok(3), mengikuti PMK 29/PMK.06/2010.
+
+- Disimpan sebagai pohon (kode 1, 3, 5, 7, 10 digit); induk harus ada sebelum turunannya. Titik/spasi pada input diabaikan. Kode persediaan harus diawali golongan `1` (konstanta `GOLONGAN_PERSEDIAAN` di `kodebarang.js`).
+- Tambah satuan, atau **impor massal** baris `kode;uraian` (urutan bebas; atomik — satu baris salah membatalkan semua; kode yang sudah ada dilewati).
+- Kode tidak bisa diubah (hanya uraian dan status aktif); kode yang punya turunan atau dipakai barang tidak bisa dihapus, hanya dinonaktifkan.
+- Operator memasangkan barang ke kode 10 digit pada form **Barang** (opsional, ada saran otomatis); barang hasil transfer menyalin kode barangnya.
+- **Isi katalog tidak disertakan**: tabel resmi (Tabel Kodifikasi BMN dari DJKN/Kemenkeu) harus diunduh dan diisi lewat impor. Data demo hanya contoh bertanda `[contoh]`.
 
 ## Transfer antar unit
 
@@ -81,7 +92,7 @@ Approver tujuan dapat menolak setelah *Dikirim*: stok otomatis kembali ke unit a
 
 ## Struktur
 
-`db.js` skema SQLite · `auth.js` password/sesi/login/reset · `oidc.js` SSO · `mail.js` email · `transfer.js` transfer antar-unit · `app.js` logika bisnis, API & otorisasi · `server.js` HTTP, cookie, CSRF · `public/` UI · `test/` tes.
+`db.js` skema SQLite · `auth.js` password/sesi/login/reset · `oidc.js` SSO · `mail.js` email · `transfer.js` transfer antar-unit · `kodebarang.js` referensi kode barang · `app.js` logika bisnis, API & otorisasi · `server.js` HTTP, cookie, CSRF · `public/` UI · `test/` tes.
 
 ## Keamanan
 

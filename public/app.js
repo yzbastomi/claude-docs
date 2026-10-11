@@ -9,6 +9,9 @@ const LABEL = {
   penyesuaian_masuk: 'Penyesuaian Opname (+)', penyesuaian_keluar: 'Penyesuaian Opname (−)',
 };
 const PIHAK = { MASUK: 'Pemasok / Pemberi', KELUAR: 'Penerima / Unit Tujuan' };
+const NAMA_LEVEL = ['Golongan', 'Bidang', 'Kelompok', 'Sub Kelompok', 'Sub-sub Kelompok'];
+// 10 digit => 1.01.01.01.001 (Golongan.Bidang.Kelompok.Sub Kelompok.Sub-sub Kelompok)
+const fmtKode = (k) => String(k ?? '').replace(/^(\d)(\d{2})?(\d{2})?(\d{2})?(\d{3})?$/, (_, ...g) => g.slice(0, 5).filter(Boolean).join('.'));
 const ROLE = { SUPER_ADMIN: 'Super Admin', OPERATOR: 'Operator', APPROVER: 'Approver' };
 
 const state = { me: null, unit: sessionStorage.getItem('unit') || '' };
@@ -117,7 +120,7 @@ function guestRoute() {
 async function start() {
   const nav = [['dashboard', 'Dashboard'], ['barang', 'Barang'], ['masuk', 'Transaksi Masuk'], ['keluar', 'Transaksi Keluar'], ['transfer', 'Transfer'], ['opname', 'Stok Opname'], ['laporan', 'Laporan']];
   if (isAP()) nav.splice(1, 0, ['persetujuan', 'Persetujuan']);
-  if (isSA()) nav.push(['admin', 'Admin']);
+  if (isSA()) nav.push(['kodebarang', 'Kode Barang'], ['admin', 'Admin']);
   $('#nav').innerHTML = nav.map(([h, t]) => `<a href="#${h}">${t}</a>`).join('');
   $('#me').textContent = `${state.me.nama} · ${ROLE[state.me.role]}${state.me.unit_kode ? ' · ' + state.me.unit_kode : ''}`;
   $('#hdr').hidden = false;
@@ -155,16 +158,29 @@ const views = {
       <form class="row" id="f"><input type="hidden" name="id">
         <label>Kode<input name="kode" required></label><label>Nama<input name="nama" required></label>
         <label>Kategori<input name="kategori" placeholder="ATK, Kebersihan…"></label><label>Satuan<input name="satuan" value="unit"></label>
+        <label>Kode barang (10 digit, opsional)<input name="kode_barang" list="kbl" inputmode="numeric" autocomplete="off" placeholder="1.01.01.01.001"><datalist id="kbl"></datalist><small class="muted" id="kbinfo"></small></label>
         <label>Stok minimum<input name="stok_minimum" type="number" min="0" step="any" value="0"></label>
         <label>Status<select name="aktif"><option value="1">Aktif</option><option value="0">Nonaktif</option></select></label>
         <div><button>Simpan</button> <button type="button" class="sec" id="reset">Batal</button></div></form></div>` : '';
-    el.innerHTML = `${form}<div class="card"><h2>Daftar barang</h2>${table([...(isSA() ? ['Unit'] : []), 'Kode', 'Nama', 'Kategori', 'Satuan', '#Stok', '#Min', '#Harga rata-rata', 'Status', ...(isOP() ? [''] : [])], items.map((i) =>
-        `<tr style="${i.aktif ? '' : 'opacity:.5'}">${isSA() ? `<td>${esc(i.unit_kode)}</td>` : ''}<td>${esc(i.kode)}</td><td>${esc(i.nama)}</td><td>${esc(i.kategori)}</td><td>${esc(i.satuan)}</td>
+    el.innerHTML = `${form}<div class="card"><h2>Daftar barang</h2>${table([...(isSA() ? ['Unit'] : []), 'Kode', 'Nama', 'Kode Barang', 'Kategori', 'Satuan', '#Stok', '#Min', '#Harga rata-rata', 'Status', ...(isOP() ? [''] : [])], items.map((i) =>
+        `<tr style="${i.aktif ? '' : 'opacity:.5'}">${isSA() ? `<td>${esc(i.unit_kode)}</td>` : ''}<td>${esc(i.kode)}</td><td>${esc(i.nama)}</td><td title="${esc(i.kode_barang_uraian ?? '')}">${i.kode_barang ? esc(fmtKode(i.kode_barang)) : '—'}</td><td>${esc(i.kategori)}</td><td>${esc(i.satuan)}</td>
         <td class="n">${fmt(i.stok)}</td><td class="n">${fmt(i.stok_minimum)}</td><td class="n">${rp(i.harga_rata)}</td><td>${badge(i.status)}</td>
         ${isOP() ? `<td><button class="sec" data-edit="${i.id}">Ubah</button> <button class="del" data-del="${i.id}">Hapus</button></td>` : ''}</tr>`))}</div>`;
     if (!isOP()) return;
     const f = $('#f');
-    $('#reset').onclick = () => f.reset();
+    $('#reset').onclick = () => { f.reset(); $('#kbinfo').textContent = ''; };
+    let tmr;
+    f.elements.kode_barang.oninput = (e) => { // saran kode dari referensi, ketik kode atau uraian
+      clearTimeout(tmr);
+      const q = e.target.value.trim();
+      tmr = setTimeout(guard(async () => {
+        if (!q) { $('#kbl').innerHTML = ''; $('#kbinfo').textContent = ''; return; }
+        const { rows } = await api('GET', `/api/kode-barang?level=5&aktif=1&limit=15&q=${encodeURIComponent(q)}`);
+        $('#kbl').innerHTML = rows.map((r) => `<option value="${fmtKode(r.kode)}">${esc(r.uraian)}</option>`).join('');
+        const tepat = rows.find((r) => r.kode === q.replace(/\D/g, ''));
+        $('#kbinfo').textContent = tepat ? tepat.uraian : '';
+      }), 250);
+    };
     f.onsubmit = guard(async (e) => {
       e.preventDefault();
       const b = formData(f); b.aktif = b.aktif === '1';
@@ -173,7 +189,7 @@ const views = {
     });
     el.onclick = guard(async (e) => {
       const ed = e.target.dataset.edit, del = e.target.dataset.del;
-      if (ed) { const i = items.find((x) => x.id == ed); for (const k of ['id', 'kode', 'nama', 'kategori', 'satuan', 'stok_minimum']) f.elements[k].value = i[k]; f.elements.aktif.value = i.aktif; scrollTo(0, 0); }
+      if (ed) { const i = items.find((x) => x.id == ed); for (const k of ['id', 'kode', 'nama', 'kategori', 'satuan', 'stok_minimum']) f.elements[k].value = i[k]; f.elements.kode_barang.value = fmtKode(i.kode_barang); $('#kbinfo').textContent = i.kode_barang_uraian ?? ''; f.elements.aktif.value = i.aktif; scrollTo(0, 0); }
       if (del && confirm('Hapus barang ini?')) { await api('DELETE', `/api/items/${del}`); toast('Barang dihapus'); render(); }
     });
   },
@@ -293,6 +309,53 @@ const views = {
       }
     });
   },
+};
+
+views.kodebarang = async (el) => {
+  if (!isSA()) throw new Error('Tidak berwenang');
+  el.innerHTML = `<div class="card"><h2>Tambah kode barang persediaan</h2>
+    <p class="muted">Format SAKTI: 10 digit <b>X.XX.XX.XX.XXX</b> = Golongan · Bidang · Kelompok · Sub Kelompok · Sub-sub Kelompok. Tambahkan dari tingkat atas (induk harus ada lebih dulu). Barang dipasangkan ke tingkat ke-5 (10 digit). Kode persediaan diawali golongan 1.</p>
+    <form class="row" id="fk"><label>Kode<input name="kode" required inputmode="numeric" autocomplete="off" placeholder="1.01.01.01.001"></label>
+      <label>Uraian<input name="uraian" required maxlength="200"></label>
+      <div><button>Simpan</button> <span class="muted" id="lvl"></span></div></form></div>
+    <div class="card"><h2>Impor massal</h2>
+    <p class="muted">Tempel baris <code>kode;uraian</code> (pemisah titik-koma, koma, tab, atau spasi; baris header boleh). Urutan bebas, induk boleh ada di dalam berkas yang sama. Kode yang sudah ada dilewati. Jika ada satu baris salah, tidak ada yang disimpan.</p>
+    <form id="fi"><textarea name="teks" rows="6" style="width:100%" placeholder="1;Persediaan&#10;101;…&#10;10101;…"></textarea><div class="bar"><button>Impor</button></div></form></div>
+    <div class="card"><h2>Daftar kode barang</h2>
+    <form class="bar" id="ff"><label>Cari kode / uraian<input name="q"></label>
+      <label>Tingkat<select name="level"><option value="">Semua</option>${NAMA_LEVEL.map((n, i) => `<option value="${i + 1}">${i + 1} — ${n}</option>`).join('')}</select></label><button>Cari</button></form>
+    <div id="daftar"></div></div>`;
+  const fk = $('#fk'), ff = $('#ff');
+  fk.elements.kode.oninput = (e) => {
+    const d = e.target.value.replace(/\D/g, ''), lv = [1, 3, 5, 7, 10].indexOf(d.length);
+    $('#lvl').textContent = !d ? '' : lv >= 0 ? `${NAMA_LEVEL[lv]} → ${fmtKode(d)}` : `${d.length} digit (harus 1, 3, 5, 7, atau 10)`;
+  };
+  const muat = guard(async () => {
+    const p = new URLSearchParams({ limit: 300 });
+    for (const [k, v] of Object.entries(formData(ff))) if (v) p.set(k, v);
+    const { rows, terpotong } = await api('GET', `/api/kode-barang?${p}`);
+    $('#daftar').innerHTML = (terpotong ? '<p class="muted">Menampilkan 300 pertama; persempit pencarian.</p>' : '') +
+      table(['Kode', 'Tingkat', 'Uraian', 'Status', '#Barang', ''], rows.map((r) =>
+        `<tr style="${r.aktif ? '' : 'opacity:.5'}"><td style="padding-left:${10 + (r.level - 1) * 14}px"><code>${fmtKode(r.kode)}</code></td><td>${NAMA_LEVEL[r.level - 1]}</td><td style="white-space:normal">${esc(r.uraian)}</td>
+        <td>${r.aktif ? 'Aktif' : 'Nonaktif'}</td><td class="n">${r.level === 5 ? r.dipakai : ''}</td>
+        <td><button class="sec" data-ubah="${r.kode}">Ubah</button> <button class="sec" data-aktif="${r.kode}" data-nilai="${r.aktif ? 0 : 1}">${r.aktif ? 'Nonaktifkan' : 'Aktifkan'}</button> <button class="del" data-hapus="${r.kode}">Hapus</button></td></tr>`));
+    $('#daftar').rows = rows;
+  });
+  ff.onsubmit = (e) => { e.preventDefault(); muat(); };
+  fk.onsubmit = guard(async (e) => { e.preventDefault(); const r = await api('POST', '/api/kode-barang', formData(fk)); toast(`Ditambahkan: ${fmtKode(r.kode)}`); fk.elements.uraian.value = ''; fk.elements.kode.focus(); muat(); });
+  $('#fi').onsubmit = guard(async (e) => {
+    e.preventDefault();
+    const r = await api('POST', '/api/kode-barang/impor', formData(e.target));
+    toast(`${r.ditambahkan} kode ditambahkan, ${r.dilewati} dilewati`); e.target.reset(); muat();
+  });
+  el.onclick = guard(async (e) => {
+    const { ubah, aktif, nilai, hapus } = e.target.dataset;
+    const row = (k) => $('#daftar').rows.find((r) => r.kode === k);
+    if (ubah) { const u = prompt(`Uraian untuk ${fmtKode(ubah)}:`, row(ubah).uraian); if (u) { await api('PUT', `/api/kode-barang/${ubah}`, { uraian: u, aktif: !!row(ubah).aktif }); toast('Uraian diubah'); muat(); } }
+    if (aktif) { await api('PUT', `/api/kode-barang/${aktif}`, { uraian: row(aktif).uraian, aktif: nilai === '1' }); muat(); }
+    if (hapus && confirm(`Hapus kode ${fmtKode(hapus)}?`)) { await api('DELETE', `/api/kode-barang/${hapus}`); toast('Kode dihapus'); muat(); }
+  });
+  muat();
 };
 
 const TR_STATUS = { DIAJUKAN: 'Menunggu persetujuan pengirim', DIKIRIM: 'Dikirim — menunggu penerimaan', DIPERIKSA: 'Diterima operator — menunggu persetujuan', DITERIMA: 'Selesai', DITOLAK_ASAL: 'Ditolak pengirim', DIKEMBALIKAN: 'Dikembalikan ke pengirim', DIBATALKAN: 'Dibatalkan' };

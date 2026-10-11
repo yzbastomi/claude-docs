@@ -15,7 +15,7 @@ export const KATEGORI = {
   penyesuaian_keluar: 'KELUAR', // dibuat otomatis oleh stok opname
 };
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -24,10 +24,11 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
   const versi = db.prepare('PRAGMA user_version').get().user_version;
   if (lama && versi < 2)
     throw new Error(`Database ${file} memakai skema lama (tanpa unit/login). Hapus file tersebut untuk memulai ulang.`);
-  if (lama && versi === 2) { // v2 -> v3: email pengguna & tautan transfer pada transaksi
+  if (lama && versi >= 2 && versi < SCHEMA_VERSION) { // migrasi bertahap (idempotent): v3 email/transfer, v4 kode barang
     const has = (t, c) => db.prepare(`PRAGMA table_info(${t})`).all().some((r) => r.name === c);
     if (!has('users', 'email')) db.exec('ALTER TABLE users ADD COLUMN email TEXT');
     if (!has('transactions', 'transfer_id')) db.exec('ALTER TABLE transactions ADD COLUMN transfer_id INTEGER');
+    if (!has('items', 'kode_barang')) db.exec('ALTER TABLE items ADD COLUMN kode_barang TEXT');
   }
   db.exec(`
     PRAGMA foreign_keys = ON;
@@ -78,8 +79,17 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
       satuan TEXT NOT NULL DEFAULT 'unit',
       stok_minimum REAL NOT NULL DEFAULT 0,
       aktif INTEGER NOT NULL DEFAULT 1,
+      kode_barang TEXT,                    -- 10 digit, merujuk kode_barang.kode (referensi gaya SAKTI)
       UNIQUE (unit_id, kode)
     );
+    CREATE TABLE IF NOT EXISTS kode_barang (
+      kode TEXT PRIMARY KEY CHECK (kode GLOB '[0-9]*' AND kode NOT GLOB '*[^0-9]*' AND length(kode) IN (1,3,5,7,10)),
+      level INTEGER NOT NULL CHECK (level BETWEEN 1 AND 5),   -- 1 golongan … 5 sub-sub kelompok (10 digit)
+      uraian TEXT NOT NULL,
+      aktif INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_items_kb ON items(kode_barang);
     CREATE TABLE IF NOT EXISTS transactions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       tanggal TEXT NOT NULL,               -- YYYY-MM-DD
@@ -156,9 +166,10 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
 
 // Hanya transaksi DISETUJUI yang memengaruhi stok.
 export const STOK_SQL = `
-  SELECT i.*, u.kode AS unit_kode, u.nama AS unit_nama,
+  SELECT i.*, u.kode AS unit_kode, u.nama AS unit_nama, kb.uraian AS kode_barang_uraian,
     COALESCE(SUM(CASE t.jenis WHEN 'MASUK' THEN t.qty ELSE -t.qty END), 0) AS stok,
     COALESCE(SUM(CASE WHEN t.jenis='MASUK' THEN t.qty * t.harga_satuan END), 0) AS nilai_masuk,
     COALESCE(SUM(CASE WHEN t.jenis='MASUK' THEN t.qty END), 0) AS qty_masuk
   FROM items i JOIN units u ON u.id = i.unit_id
+  LEFT JOIN kode_barang kb ON kb.kode = i.kode_barang
   LEFT JOIN transactions t ON t.item_id = i.id AND t.status = 'DISETUJUI'`;

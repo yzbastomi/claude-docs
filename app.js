@@ -2,6 +2,7 @@ import { KATEGORI, STOK_SQL } from './db.js';
 import { HttpError } from './errors.js';
 import { hashPassword, validPassword } from './auth.js';
 import { transferRoutes } from './transfer.js';
+import { createKodeBarang, normalisasi, formatKode } from './kodebarang.js';
 
 export { HttpError };
 const bad = (m) => new HttpError(400, m);
@@ -63,7 +64,21 @@ export function createApi(db) {
     const stok_minimum = b.stok_minimum === '' || b.stok_minimum == null ? 0 : num(b.stok_minimum, 'Stok minimum');
     if (stok_minimum < 0) throw bad('Stok minimum tidak boleh negatif');
     if (get('SELECT id FROM items WHERE unit_id = ? AND kode = ? AND id IS NOT ?', unit_id, kode, id ?? null)) throw bad(`Kode barang "${kode}" sudah dipakai`);
-    return { kode, nama, kategori: str(b.kategori), satuan: str(b.satuan) || 'unit', stok_minimum };
+    // kode_barang: tidak dikirim = tetap; kosong = hapus; terisi = harus 10 digit & ada di referensi (aktif, kecuali tidak berubah)
+    let kode_barang;
+    const lama = id ? get('SELECT kode_barang FROM items WHERE id = ?', id)?.kode_barang ?? null : null;
+    if (!('kode_barang' in b)) kode_barang = lama;
+    else {
+      const kb = normalisasi(b.kode_barang);
+      if (!kb) kode_barang = null;
+      else {
+        const ref = get('SELECT * FROM kode_barang WHERE kode = ?', kb);
+        if (kb.length !== 10 || !ref) throw bad(`Kode barang ${kb.length === 10 ? formatKode(kb) : '"' + kb + '"'} tidak ada di referensi (harus 10 digit)`);
+        if (!ref.aktif && kb !== lama) throw bad(`Kode barang ${formatKode(kb)} nonaktif`);
+        kode_barang = kb;
+      }
+    }
+    return { kode, nama, kategori: str(b.kategori), satuan: str(b.satuan) || 'unit', stok_minimum, kode_barang };
   }
 
   // ---------- Transaksi ----------
@@ -211,12 +226,16 @@ export function createApi(db) {
 
   const transfer = transferRoutes({ all, get, run, tx, audit, need, stokItem, itemUntuk, assertNoNegative, insertTx, bad, str, num, isDate, today, HttpError });
 
+  const kodeBarang = createKodeBarang({ all, get, run, tx, audit, need, bad, str, HttpError });
+
   // ---------- Router ----------
   // Mengembalikan body, atau [status, body]
   return function handle(method, path, query, body, user) {
     if (!user) throw new HttpError(401, 'Silakan login');
     const tr = transfer(method, path, query, body, user);
     if (tr !== undefined) return tr;
+    const kb = kodeBarang(method, path, query, body, user);
+    if (kb !== undefined) return kb;
     let m;
     if (method === 'GET' && path === '/api/meta') return { kategori: KATEGORI };
     if (method === 'GET' && path === '/api/dashboard') return dashboard(user, query);
@@ -286,7 +305,7 @@ export function createApi(db) {
     if (path === '/api/items' && method === 'POST') {
       need(user, OP);
       const v = validItem(body, user.unit_id);
-      const r = run('INSERT INTO items (unit_id,kode,nama,kategori,satuan,stok_minimum) VALUES (?,?,?,?,?,?)', user.unit_id, v.kode, v.nama, v.kategori, v.satuan, v.stok_minimum);
+      const r = run('INSERT INTO items (unit_id,kode,nama,kategori,satuan,stok_minimum,kode_barang) VALUES (?,?,?,?,?,?,?)', user.unit_id, v.kode, v.nama, v.kategori, v.satuan, v.stok_minimum, v.kode_barang);
       return [201, stokItem(Number(r.lastInsertRowid))];
     }
     if ((m = path.match(/^\/api\/items\/(\d+)$/)) && (method === 'PUT' || method === 'DELETE')) {
@@ -294,8 +313,8 @@ export function createApi(db) {
       const it = itemUntuk(user, m[1]);
       if (method === 'PUT') {
         const v = validItem(body, it.unit_id, it.id);
-        run('UPDATE items SET kode=?, nama=?, kategori=?, satuan=?, stok_minimum=?, aktif=? WHERE id=?',
-          v.kode, v.nama, v.kategori, v.satuan, v.stok_minimum, body.aktif === false || body.aktif === 0 ? 0 : 1, it.id);
+        run('UPDATE items SET kode=?, nama=?, kategori=?, satuan=?, stok_minimum=?, kode_barang=?, aktif=? WHERE id=?',
+          v.kode, v.nama, v.kategori, v.satuan, v.stok_minimum, v.kode_barang, body.aktif === false || body.aktif === 0 ? 0 : 1, it.id);
         return stokItem(it.id);
       }
       if (get('SELECT 1 FROM transactions WHERE item_id = ? LIMIT 1', it.id) || get('SELECT 1 FROM opname_lines WHERE item_id = ? LIMIT 1', it.id) || get('SELECT 1 FROM transfers WHERE item_asal_id = ? OR item_tujuan_id = ? LIMIT 1', it.id, it.id))
