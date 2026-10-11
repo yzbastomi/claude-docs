@@ -1,0 +1,12 @@
+{
+  "name": "stok-gudang",
+  "version": "0.1.0",
+  "description": "Aplikasi web dasar pengelolaan stok persediaan gudang",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  }
+}
