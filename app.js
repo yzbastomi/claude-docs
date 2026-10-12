@@ -16,7 +16,9 @@ const num = (v, nama) => {
 const str = (v) => (v == null ? '' : String(v).trim());
 const SA = 'SUPER_ADMIN', OP = 'OPERATOR', AP = 'APPROVER';
 
-export function createApi(db) {
+// `sekarang` (epoch ms) dapat disuntikkan agar stempel waktu keputusan sejalan dengan jam notifikasi (berguna untuk tes)
+export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}) {
+  const iso = () => new Date(sekarang()).toISOString();
   const all = (sql, ...p) => db.prepare(sql).all(...p);
   const get = (sql, ...p) => db.prepare(sql).get(...p);
   const run = (sql, ...p) => db.prepare(sql).run(...p);
@@ -25,6 +27,9 @@ export function createApi(db) {
     try { const r = fn(); db.exec('COMMIT'); return r; }
     catch (e) { db.exec('ROLLBACK'); throw e; }
   };
+  // Penandaan notifikasi email (no-op bila notifikasi tidak aktif)
+  const kabari = (ids, kecuali = null) => notif?.tandai(ids, kecuali);
+  const penerima = (unitId, role) => notif?.penerima(unitId, role) ?? [];
   const audit = (user, aksi, detail = '') => run('INSERT INTO audit_log (user_id, aksi, detail) VALUES (?,?,?)', user.id, aksi, detail);
 
   // ---------- Otorisasi ----------
@@ -99,7 +104,7 @@ export function createApi(db) {
   const insertTx = (t, extra = {}) =>
     run(`INSERT INTO transactions (tanggal,jenis,kategori,item_id,qty,harga_satuan,pihak,no_dokumen,keterangan,opname_id,status,dibuat_oleh,diputuskan_oleh,diputuskan_at,transfer_id)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, t.tanggal, t.jenis, t.kategori, t.item_id, t.qty, t.harga_satuan, t.pihak, t.no_dokumen, t.keterangan,
-      extra.opname_id ?? null, extra.status ?? 'MENUNGGU', extra.dibuat_oleh ?? null, extra.diputuskan_oleh ?? null, extra.diputuskan_oleh ? new Date().toISOString() : null, extra.transfer_id ?? null);
+      extra.opname_id ?? null, extra.status ?? 'MENUNGGU', extra.dibuat_oleh ?? null, extra.diputuskan_oleh ?? null, extra.diputuskan_oleh ? iso() : null, extra.transfer_id ?? null);
 
   // Saldo (hanya transaksi disetujui) tidak boleh negatif pada titik waktu mana pun
   function assertNoNegative(item_id) {
@@ -225,7 +230,7 @@ export function createApi(db) {
   const userRow = (id) => get(`SELECT u.id, u.username, u.nama, u.email, u.role, u.unit_id, u.aktif, un.kode AS unit_kode, un.nama AS unit_nama
                                FROM users u LEFT JOIN units un ON un.id = u.unit_id WHERE u.id = ?`, id);
 
-  const transfer = transferRoutes({ all, get, run, tx, audit, need, stokItem, itemUntuk, assertNoNegative, insertTx, bad, str, num, isDate, today, HttpError });
+  const transfer = transferRoutes({ all, get, run, tx, audit, need, stokItem, itemUntuk, assertNoNegative, insertTx, bad, str, num, isDate, today, HttpError, kabari, penerima, iso });
 
   const kodeBarang = createKodeBarang({ all, get, run, tx, audit, need, bad, str, HttpError });
 
@@ -233,6 +238,12 @@ export function createApi(db) {
   // Mengembalikan body, atau [status, body]
   return function handle(method, path, query, body, user) {
     if (!user) throw new HttpError(401, 'Silakan login');
+    if (path === '/api/akun/notifikasi' && method === 'POST') {
+      if (!['LANGSUNG', 'RINGKASAN', 'MATI'].includes(body.notif)) throw bad('Pilihan notifikasi tidak valid');
+      run('UPDATE users SET notif = ? WHERE id = ?', body.notif, user.id);
+      if (body.notif !== 'LANGSUNG') run('DELETE FROM notif_tunda WHERE user_id = ?', user.id);
+      return { notif: body.notif };
+    }
     const tr = transfer(method, path, query, body, user);
     if (tr !== undefined) return tr;
     const kb = kodeBarang(method, path, query, body, user);
@@ -345,6 +356,7 @@ export function createApi(db) {
       const v = validTx(user, body);
       if (v.jenis === 'KELUAR' && v.qty > v.stok + 1e-9) throw bad(`Stok tersedia hanya ${v.stok}`);
       const r = insertTx(v, { status: 'MENUNGGU', dibuat_oleh: user.id });
+      kabari(penerima(user.unit_id, 'APPROVER'), user.id);
       return [201, { id: Number(r.lastInsertRowid), status: 'MENUNGGU' }];
     }
     if ((m = path.match(/^\/api\/transaksi\/(\d+)(?:\/(setujui|tolak))?$/))) {
@@ -361,16 +373,18 @@ export function createApi(db) {
         const catatan = str(body.catatan);
         if (m[2] === 'tolak') {
           if (!catatan) throw bad('Alasan penolakan wajib diisi');
-          run("UPDATE transactions SET status='DITOLAK', diputuskan_oleh=?, diputuskan_at=?, catatan_keputusan=? WHERE id=?", user.id, new Date().toISOString(), catatan, t.id);
+          run("UPDATE transactions SET status='DITOLAK', diputuskan_oleh=?, diputuskan_at=?, catatan_keputusan=? WHERE id=?", user.id, iso(), catatan, t.id);
           audit(user, 'transaksi_tolak', `#${t.id}`);
+          kabari([t.dibuat_oleh], user.id);
           return { id: t.id, status: 'DITOLAK' };
         }
         return tx(() => {
           // pemakaian/keluar dinilai dengan harga rata-rata saat disetujui
           const harga = t.jenis === 'KELUAR' ? stokItem(t.item_id).harga_rata : t.harga_satuan;
-          run("UPDATE transactions SET status='DISETUJUI', harga_satuan=?, diputuskan_oleh=?, diputuskan_at=?, catatan_keputusan=? WHERE id=?", harga, user.id, new Date().toISOString(), catatan, t.id);
+          run("UPDATE transactions SET status='DISETUJUI', harga_satuan=?, diputuskan_oleh=?, diputuskan_at=?, catatan_keputusan=? WHERE id=?", harga, user.id, iso(), catatan, t.id);
           assertNoNegative(t.item_id);
           audit(user, 'transaksi_setuju', `#${t.id}`);
+          kabari([t.dibuat_oleh], user.id);
           return { id: t.id, status: 'DISETUJUI' };
         });
       }
@@ -421,6 +435,7 @@ export function createApi(db) {
         const kosong = o.lines.filter((l) => l.stok_fisik == null);
         if (kosong.length) throw bad(`${kosong.length} barang belum diisi stok fisiknya`);
         run("UPDATE opnames SET status='DIAJUKAN', catatan_keputusan='' WHERE id=?", o.id);
+        kabari(penerima(user.unit_id, 'APPROVER'), user.id);
         audit(user, 'opname_ajukan', `${o.unit_kode} ${o.periode}`);
         return opnameUntuk(user, o.id);
       }
@@ -429,7 +444,8 @@ export function createApi(db) {
         if (o.status !== 'DIAJUKAN') throw bad('Opname belum diajukan');
         const catatan = str(body.catatan);
         if (!catatan) throw bad('Alasan pengembalian wajib diisi');
-        run("UPDATE opnames SET status='DRAFT', catatan_keputusan=? WHERE id=?", catatan, o.id);
+        run("UPDATE opnames SET status='DRAFT', catatan_keputusan=?, diputuskan_at=? WHERE id=?", catatan, iso(), o.id);
+        kabari([o.dibuat_oleh], user.id);
         audit(user, 'opname_kembalikan', `${o.unit_kode} ${o.periode}`);
         return opnameUntuk(user, o.id);
       }
@@ -452,7 +468,8 @@ export function createApi(db) {
             }, { opname_id: o.id, status: 'DISETUJUI', dibuat_oleh: o.dibuat_oleh, diputuskan_oleh: user.id });
             assertNoNegative(l.item_id);
           }
-          run("UPDATE opnames SET status='FINAL', diputuskan_oleh=? WHERE id=?", user.id, o.id);
+          run("UPDATE opnames SET status='FINAL', diputuskan_oleh=?, diputuskan_at=? WHERE id=?", user.id, iso(), o.id);
+          kabari([o.dibuat_oleh], user.id);
           audit(user, 'opname_final', `${o.unit_kode} ${o.periode}`);
           return opnameUntuk(user, o.id);
         });

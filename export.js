@@ -10,12 +10,8 @@ import PDFDocument from 'pdfkit';
 import { HttpError } from './errors.js';
 import { formatKode, NAMA_LEVEL } from './kodebarang.js';
 
-export const LABEL = {
-  pembelian: 'Pembelian', hibah_masuk: 'Hibah Masuk', transfer_masuk: 'Transfer Masuk', perolehan_lain: 'Perolehan Lainnya',
-  pemakaian: 'Pemakaian', hibah_keluar: 'Hibah Keluar', transfer_keluar: 'Transfer Keluar',
-  penyesuaian_masuk: 'Penyesuaian Opname (+)', penyesuaian_keluar: 'Penyesuaian Opname (-)',
-};
-const TR_STATUS = { DIAJUKAN: 'Menunggu persetujuan pengirim', DIKIRIM: 'Dikirim', DIPERIKSA: 'Diterima operator, menunggu persetujuan', DITERIMA: 'Selesai', DITOLAK_ASAL: 'Ditolak pengirim', DIKEMBALIKAN: 'Dikembalikan ke pengirim', DIBATALKAN: 'Dibatalkan' };
+import { LABEL, TR_STATUS } from './labels.js';
+export { LABEL };
 const ROLE = { SUPER_ADMIN: 'Super Admin', OPERATOR: 'Operator', APPROVER: 'Approver' };
 const hariIni = () => new Date().toISOString().slice(0, 10);
 

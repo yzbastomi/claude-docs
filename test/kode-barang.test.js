@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { setup } from './helpers.js';
 import { formatKode, normalisasi } from '../kodebarang.js';
+import { SCHEMA_VERSION } from '../db.js';
 
 const pohon = (sa) => {
   sa('POST', '/api/kode-barang', { kode: '1', uraian: 'Persediaan' });
@@ -112,7 +113,7 @@ test('migrasi dari skema v3 menambah kolom kode_barang tanpa menghapus data', as
   awal.close();
   const db = openDb(f);
   assert.equal(db.prepare('SELECT nama, kode_barang FROM items').get().nama, 'Barang A');
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 5);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
   db.prepare("INSERT INTO kode_barang(kode, level, uraian) VALUES ('1',1,'P')").run();
   assert.throws(() => db.prepare("INSERT INTO kode_barang(kode, level, uraian) VALUES ('12',2,'salah')").run(), /CHECK/);
 });
@@ -128,5 +129,5 @@ test('migrasi v4 → v5 menambah kolom penerimaan sebagian pada transfer', async
   const db = openDb(f);
   const r = db.prepare('SELECT qty, qty_diterima, catatan_penerimaan FROM transfers').get();
   assert.equal(r.qty, 5); assert.equal(r.qty_diterima, null); assert.equal(r.catatan_penerimaan, '');
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 5);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
 });

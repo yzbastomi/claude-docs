@@ -11,7 +11,7 @@
 const SA = 'SUPER_ADMIN', OP = 'OPERATOR', AP = 'APPROVER';
 
 export function transferRoutes(ctx) {
-  const { all, get, run, tx, audit, need, stokItem, itemUntuk, assertNoNegative, insertTx, bad, str, num, isDate, today, HttpError } = ctx;
+  const { all, get, run, tx, audit, need, stokItem, itemUntuk, assertNoNegative, insertTx, bad, str, num, isDate, today, HttpError, kabari, penerima, iso } = ctx;
 
   const SELECT = `SELECT t.*, ua.kode AS unit_asal_kode, ua.nama AS unit_asal_nama, ut.kode AS unit_tujuan_kode, ut.nama AS unit_tujuan_nama,
       ia.kode AS item_asal_kode, ia.nama AS item_asal_nama, ia.satuan AS satuan, it.kode AS item_tujuan_kode, it.nama AS item_tujuan_nama
@@ -38,7 +38,7 @@ export function transferRoutes(ctx) {
   const izinkan = (u, t, aksi) => {
     if (!u || !aksiUntuk(u, t).includes(aksi)) throw new HttpError(403, `Anda tidak dapat melakukan aksi "${aksi}" pada transfer berstatus ${t.status}`);
   };
-  const setStatus = (id, status, kolom = '', ...v) => run(`UPDATE transfers SET status = ?${kolom} WHERE id = ?`, status, ...v, id);
+  const setStatus = (id, status, kolom = '', ...v) => run(`UPDATE transfers SET status = ?, updated_at = ?${kolom} WHERE id = ?`, status, iso(), ...v, id);
 
   return function handle(method, path, query, body, user) {
     let m;
@@ -69,6 +69,7 @@ export function transferRoutes(ctx) {
       if (!isDate(tanggal)) throw bad('Format tanggal harus YYYY-MM-DD');
       const r = run(`INSERT INTO transfers (unit_asal_id, unit_tujuan_id, item_asal_id, qty, tanggal, no_dokumen, keterangan, dibuat_oleh)
                      VALUES (?,?,?,?,?,?,?,?)`, user.unit_id, tujuan.id, item.id, qty, tanggal, str(body.no_dokumen), str(body.keterangan), user.id);
+      kabari(penerima(user.unit_id, 'APPROVER'));
       audit(user, 'transfer_ajukan', `#${r.lastInsertRowid} ${item.kode} x${qty} → ${tujuan.kode}`);
       return [201, withAksi(user, load(user, r.lastInsertRowid))];
     }
@@ -106,6 +107,7 @@ export function transferRoutes(ctx) {
               user.unit_id, asal.kode, asal.nama, asal.kategori, asal.satuan, asal.kode_barang).lastInsertRowid);
           setStatus(t.id, 'DIPERIKSA', ', item_tujuan_id = ?, diterima_oleh = ?, qty_diterima = ?, catatan_penerimaan = ?', tujuanId, user.id, qtyTerima, qtyTerima < t.qty ? catatan : '');
         });
+        kabari(penerima(t.unit_tujuan_id, 'APPROVER'));
         audit(user, 'transfer_terima', `#${t.id} ${qtyTerima}/${t.qty}`);
       } else if (aksi === 'setujui') {
         if (t.status === 'DIAJUKAN') {
@@ -119,6 +121,7 @@ export function transferRoutes(ctx) {
             assertNoNegative(t.item_asal_id);
             setStatus(t.id, 'DIKIRIM', ', harga_satuan = ?, disetujui_asal_oleh = ?', item.harga_rata, user.id);
           });
+          kabari([...penerima(t.unit_tujuan_id, 'OPERATOR'), t.dibuat_oleh]);
           audit(user, 'transfer_kirim', `#${t.id}`);
         } else { // DIPERIKSA: approver tujuan
           const diterima = t.qty_diterima ?? t.qty, selisih = t.qty - diterima; // NULL = data sebelum fitur sebagian
@@ -135,12 +138,14 @@ export function transferRoutes(ctx) {
               }, { status: 'DISETUJUI', dibuat_oleh: t.dibuat_oleh, diputuskan_oleh: user.id, transfer_id: t.id });
             setStatus(t.id, 'DITERIMA', ', disetujui_tujuan_oleh = ?', user.id);
           });
+          kabari([t.dibuat_oleh, t.diterima_oleh]);
           audit(user, 'transfer_diterima', `#${t.id}`);
         }
       } else { // tolak
         if (!catatan) throw bad('Alasan penolakan wajib diisi');
         if (t.status === 'DIAJUKAN') {
           setStatus(t.id, 'DITOLAK_ASAL', ', catatan_keputusan = ?', catatan);
+          kabari([t.dibuat_oleh]);
           audit(user, 'transfer_tolak_asal', `#${t.id}`);
         } else { // barang sudah keluar dari asal: kembalikan stoknya
           tx(() => {
@@ -150,6 +155,7 @@ export function transferRoutes(ctx) {
             }, { status: 'DISETUJUI', dibuat_oleh: t.dibuat_oleh, diputuskan_oleh: user.id, transfer_id: t.id });
             setStatus(t.id, 'DIKEMBALIKAN', ', catatan_keputusan = ?, disetujui_tujuan_oleh = ?', catatan, user.id);
           });
+          kabari([t.dibuat_oleh, t.diterima_oleh]);
           audit(user, 'transfer_kembalikan', `#${t.id}`);
         }
       }

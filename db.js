@@ -15,7 +15,7 @@ export const KATEGORI = {
   penyesuaian_keluar: 'KELUAR', // dibuat otomatis oleh stok opname
 };
 
-const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -31,6 +31,11 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
     if (!has('users', 'email')) db.exec('ALTER TABLE users ADD COLUMN email TEXT');
     if (!has('transactions', 'transfer_id')) db.exec('ALTER TABLE transactions ADD COLUMN transfer_id INTEGER');
     if (!has('items', 'kode_barang')) db.exec('ALTER TABLE items ADD COLUMN kode_barang TEXT');
+    if (!has('users', 'notif')) { // v6: preferensi notifikasi email
+      db.exec("ALTER TABLE users ADD COLUMN notif TEXT NOT NULL DEFAULT 'LANGSUNG'; ALTER TABLE users ADD COLUMN notif_terakhir TEXT; ALTER TABLE users ADD COLUMN digest_terakhir TEXT");
+    }
+    if (!has('opnames', 'diputuskan_at')) db.exec('ALTER TABLE opnames ADD COLUMN diputuskan_at TEXT');
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'transfers'").get() && !has('transfers', 'updated_at')) db.exec('ALTER TABLE transfers ADD COLUMN updated_at TEXT');
     if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'transfers'").get() && !has('transfers', 'qty_diterima')) { // v5: penerimaan sebagian
       db.exec("ALTER TABLE transfers ADD COLUMN qty_diterima REAL; ALTER TABLE transfers ADD COLUMN catatan_penerimaan TEXT NOT NULL DEFAULT ''");
     }
@@ -53,6 +58,9 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
       aktif INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       email TEXT,
+      notif TEXT NOT NULL DEFAULT 'LANGSUNG',   -- LANGSUNG | RINGKASAN | MATI
+      notif_terakhir TEXT,                      -- ISO; hasil keputusan sebelum waktu ini sudah diberitahukan
+      digest_terakhir TEXT,                     -- tanggal (lokal) ringkasan harian terakhir
       CHECK ((role = 'SUPER_ADMIN' AND unit_id IS NULL) OR (role <> 'SUPER_ADMIN' AND unit_id IS NOT NULL))
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email COLLATE NOCASE) WHERE email IS NOT NULL;
@@ -79,6 +87,11 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
       kunci TEXT PRIMARY KEY,
       n INTEGER NOT NULL,
       sampai INTEGER NOT NULL                 -- akhir jendela (epoch ms)
+    );
+    CREATE TABLE IF NOT EXISTS notif_tunda (    -- pengguna yang akan diberi tahu setelah jeda (digabung per pengguna)
+      user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      kirim_setelah INTEGER NOT NULL,
+      percobaan INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS audit_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -152,6 +165,7 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
       diterima_oleh INTEGER REFERENCES users(id),
       disetujui_tujuan_oleh INTEGER REFERENCES users(id),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT,                               -- ISO, setiap perubahan status
       CHECK (unit_asal_id <> unit_tujuan_id)
     );
     CREATE INDEX IF NOT EXISTS idx_tr_asal ON transfers(unit_asal_id, status);
@@ -167,6 +181,7 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
       catatan_keputusan TEXT NOT NULL DEFAULT '',
       dibuat_oleh INTEGER REFERENCES users(id),
       diputuskan_oleh INTEGER REFERENCES users(id),
+      diputuskan_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE (unit_id, tipe, periode)
     );

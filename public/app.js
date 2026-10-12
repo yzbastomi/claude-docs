@@ -288,10 +288,19 @@ const views = {
   },
 
   async akun(el) {
-    el.innerHTML = `<div class="card" style="max-width:420px"><h2>Akun saya</h2><p>${esc(state.me.nama)} · ${esc(state.me.username)}<br><span class="muted">Email: ${esc(state.me.email ?? 'belum diisi — hubungi super admin agar SSO dan reset password dapat dipakai')}</span></p><h2>Ubah password</h2><form id="f" style="display:grid;gap:12px">
+    el.innerHTML = `<div class="card" style="max-width:420px"><h2>Akun saya</h2><p>${esc(state.me.nama)} · ${esc(state.me.username)}<br><span class="muted">Email: ${esc(state.me.email ?? 'belum diisi — hubungi super admin agar SSO dan reset password dapat dipakai')}</span></p>${isSA() ? '' : `<h2>Notifikasi email</h2><form id="fn" style="display:grid;gap:8px;margin-bottom:16px">
+      <select name="notif"><option value="LANGSUNG">Langsung (email beberapa menit setelah ada hal baru)</option><option value="RINGKASAN">Ringkasan harian (satu email per pagi)</option><option value="MATI">Mati</option></select>
+      <small class="muted">${state.me.email ? `Dikirim ke ${esc(state.me.email)}: antrean persetujuan untuk approver, serta hasil keputusan dan transfer yang perlu diterima untuk operator.` : 'Belum ada email pada akun Anda, sehingga tidak ada email yang dikirim. Hubungi super admin untuk mengisinya.'}</small>
+      <div><button>Simpan</button></div></form>`}
+    <h2>Ubah password</h2><form id="f" style="display:grid;gap:12px">
       <label>Password saat ini<input type="password" name="password_lama" required autocomplete="current-password"></label>
       <label>Password baru (min. 8 karakter)<input type="password" name="password_baru" minlength="8" required autocomplete="new-password"></label>
       <div><button>Simpan</button></div></form></div>`;
+    const fn = $('#fn');
+    if (fn) {
+      fn.elements.notif.value = state.me.notif ?? 'LANGSUNG';
+      fn.onsubmit = guard(async (e) => { e.preventDefault(); const r = await api('POST', '/api/akun/notifikasi', formData(fn)); state.me.notif = r.notif; toast('Pengaturan notifikasi disimpan'); });
+    }
     $('#f').onsubmit = guard(async (e) => { e.preventDefault(); await api('POST', '/api/auth/ubah-password', formData(e.target)); e.target.reset(); toast('Password diubah'); });
   },
 

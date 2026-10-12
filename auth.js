@@ -39,7 +39,7 @@ export function createAuth(db, { mailer = null, baseUrl = 'http://localhost:3000
   }
   const audit = (user_id, aksi, detail = '') =>
     db.prepare('INSERT INTO audit_log (user_id, aksi, detail) VALUES (?,?,?)').run(user_id ?? null, aksi, detail);
-  const publik = (u) => ({ id: u.id, username: u.username, nama: u.nama, role: u.role, unit_id: u.unit_id, unit_nama: u.unit_nama ?? null, unit_kode: u.unit_kode ?? null, email: u.email ?? null });
+  const publik = (u) => ({ id: u.id, username: u.username, nama: u.nama, role: u.role, unit_id: u.unit_id, unit_nama: u.unit_nama ?? null, unit_kode: u.unit_kode ?? null, email: u.email ?? null, notif: u.notif ?? 'LANGSUNG' });
 
   function login(username, password, ip = '') {
     const key = `${String(username).toLowerCase()}|${ip}`;

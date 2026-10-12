@@ -8,6 +8,7 @@ import { createAuth } from './auth.js';
 import { HttpError } from './errors.js';
 import { oidcFromEnv, sqliteStore, SsoError } from './oidc.js';
 import { createMailer } from './mail.js';
+import { createNotifier } from './notif.js';
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), 'public');
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
@@ -27,7 +28,8 @@ const cookieOf = (req, name = COOKIE) => {
 // opts: { mailer, oidc, baseUrl, passwordLogin } — tanpa mailer, fitur lupa password nonaktif; tanpa oidc, SSO nonaktif.
 export function createApp(db = openDb(), opts = {}) {
   const { oidc = null, mailer = null, baseUrl = 'http://localhost:3000', passwordLogin = true } = opts;
-  const api = createApi(db);
+  const notif = mailer && opts.notif !== false ? createNotifier(db, { mailer, baseUrl, jedaMs: opts.notifJedaMs, digestJam: opts.digestJam }) : null;
+  const api = createApi(db, { notif, sekarang: opts.sekarang });
   const auth = createAuth(db, { mailer, baseUrl, passwordLogin });
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
@@ -134,7 +136,7 @@ export function createApp(db = openDb(), opts = {}) {
       send(500, { error: 'Kesalahan server' });
     }
   });
-  server.auth = auth;
+  server.auth = auth; server.notif = notif;
   return server;
 }
 
@@ -146,7 +148,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const oidc = oidcFromEnv(process.env, baseUrl, sqliteStore(db)); // state SSO di DB: callback boleh dilayani proses lain
   if (mailer.kind === 'console') console.warn('PERINGATAN: SMTP_HOST belum diisi — email reset password hanya dicetak di konsol (jangan untuk produksi).');
   if (process.env.NODE_ENV === 'production' && !process.env.BASE_URL) console.warn('PERINGATAN: BASE_URL belum diisi; tautan reset password akan mengarah ke localhost.');
-  const server = createApp(db, { mailer, oidc, baseUrl, passwordLogin: process.env.PASSWORD_LOGIN !== 'off' });
+  const server = createApp(db, {
+    mailer, oidc, baseUrl, passwordLogin: process.env.PASSWORD_LOGIN !== 'off', notif: process.env.NOTIF !== 'off',
+    notifJedaMs: (Number(process.env.NOTIF_JEDA_MENIT) >= 0 && process.env.NOTIF_JEDA_MENIT !== undefined ? Number(process.env.NOTIF_JEDA_MENIT) : 5) * 60e3,
+    digestJam: process.env.NOTIF_DIGEST_JAM !== undefined ? Number(process.env.NOTIF_DIGEST_JAM) : 7,
+  });
+  server.notif?.mulai((Number(process.env.NOTIF_CEK_DETIK) || 30) * 1000);
   const admin = server.auth.ensureAdmin();
   if (admin) {
     console.log(`Super admin dibuat — username: ${admin.username}${admin.generated ? `  password: ${admin.password}  (catat sekarang, tidak ditampilkan lagi)` : ''}`);

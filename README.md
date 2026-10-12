@@ -31,6 +31,7 @@ Saat database masih kosong, server membuat akun **super admin** (`ADMIN_USERNAME
 | `OIDC_ALLOWED_DOMAIN` | Opsional, batasi domain email (pisahkan koma) |
 | `OIDC_EMAIL_CLAIM` | Default `email`; untuk Microsoft Entra bila tak ada gunakan `preferred_username` |
 | `OIDC_SCOPES`, `OIDC_LABEL` | Default `openid email profile` dan teks tombol |
+| `NOTIF=off`, `NOTIF_JEDA_MENIT`, `NOTIF_DIGEST_JAM`, `NOTIF_CEK_DETIK` | Notifikasi email antrean persetujuan: matikan, jeda penggabungan (5), jam ringkasan harian waktu server (7), interval pekerja (30) |
 | `PASSWORD_LOGIN=off` | Hanya SSO; login password tetap tersedia untuk super admin (akses darurat) |
 
 ## Peran
@@ -86,6 +87,15 @@ Menu **Transfer** memindahkan barang antar fakultas dengan jejak yang tertaut (k
 
 Approver tujuan dapat menolak setelah *Dikirim*: stok otomatis kembali ke unit asal. Selama di perjalanan barang tidak dihitung di unit mana pun. Kategori "Transfer" pada form transaksi biasa tetap ada untuk pihak di luar aplikasi. **Penerimaan sebagian**: operator tujuan mengisi jumlah diterima (≤ dikirim) dan alasan selisih; saat approver tujuan menyetujui, jumlah diterima masuk ke tujuan dan selisihnya otomatis kembali ke stok unit asal (transaksi pengembalian tertaut). Jika barang memang hilang/rusak, unit asal menyesuaikannya lewat stok opname.
 
+## Notifikasi email
+
+Menggunakan pengirim email yang sama dengan reset password (`SMTP_*`; tanpa SMTP hanya dicetak ke konsol). Pengguna yang akunnya punya email memilih mode di menu **Akun**: **Langsung** (default), **Ringkasan harian**, atau **Mati**.
+
+- **Approver**: antrean transaksi, opname, dan transfer yang menunggu keputusan unitnya.
+- **Operator**: transfer masuk yang perlu diterima, opname yang dikembalikan, serta hasil keputusan (transaksi disetujui/ditolak beserta alasan, opname, transfer).
+- Penandaan digabung per pengguna dalam jeda `NOTIF_JEDA_MENIT`, dan pesan disusun saat dikirim dari kondisi terkini, jadi 20 transaksi beruntun menjadi **satu** email dengan hitungan terbaru. Pelaku tidak diberi tahu tentang aksinya sendiri; super admin tidak menerima notifikasi.
+- Gagal kirim dicoba ulang (1 menit, 5 menit, 30 menit, 2 jam) lalu berhenti. Aman dijalankan di beberapa proses: penandaan dan ringkasan harian diklaim secara atomik di database.
+
 ## Lupa password & SSO
 
 - **Reset mandiri**: tautan "Lupa password?" mengirim email berisi tautan sekali pakai (30 menit, di *fragment* URL sehingga tidak masuk log server). Respons selalu sama agar keberadaan akun tidak bocor; maksimum 3 permintaan/jam per akun dan 10/jam per IP. Setelah reset, semua sesi akun dicabut. Akun tanpa email tidak bisa memakainya — super admin mengisi email di menu Admin atau mengatur password langsung.
@@ -103,7 +113,7 @@ Approver tujuan dapat menolak setelah *Dikirim*: stok otomatis kembali ke unit a
 
 ## Struktur
 
-`db.js` skema SQLite · `auth.js` password/sesi/login/reset · `oidc.js` SSO · `mail.js` email · `transfer.js` transfer antar-unit · `kodebarang.js` referensi kode barang · `export.js` Excel/PDF · `app.js` logika bisnis, API & otorisasi · `server.js` HTTP, cookie, CSRF · `public/` UI · `test/` tes.
+`db.js` skema SQLite · `auth.js` password/sesi/login/reset · `oidc.js` SSO · `mail.js` email · `notif.js` notifikasi · `transfer.js` transfer antar-unit · `kodebarang.js` referensi kode barang · `export.js` Excel/PDF · `app.js` logika bisnis, API & otorisasi · `server.js` HTTP, cookie, CSRF · `public/` UI · `test/` tes.
 
 ## Menjalankan beberapa proses
 
@@ -115,4 +125,4 @@ Password di-hash scrypt; sesi berupa token acak (hanya hash-nya disimpan) di coo
 
 ## Belum ada (langkah lanjutan yang disarankan)
 
-Notifikasi email untuk antrean persetujuan, penyimpanan state SSO bersama untuk banyak instance, multi-gudang per unit, ekspor Excel/PDF, upload lampiran dokumen, batch/kedaluwarsa.
+multi-gudang per unit, ekspor Excel/PDF, upload lampiran dokumen, batch/kedaluwarsa.
