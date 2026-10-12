@@ -89,7 +89,7 @@ Approver tujuan dapat menolak setelah *Dikirim*: stok otomatis kembali ke unit a
 ## Lupa password & SSO
 
 - **Reset mandiri**: tautan "Lupa password?" mengirim email berisi tautan sekali pakai (30 menit, di *fragment* URL sehingga tidak masuk log server). Respons selalu sama agar keberadaan akun tidak bocor; maksimum 3 permintaan/jam per akun dan 10/jam per IP. Setelah reset, semua sesi akun dicabut. Akun tanpa email tidak bisa memakainya — super admin mengisi email di menu Admin atau mengatur password langsung.
-- **SSO (OIDC)**: Authorization Code + PKCE, `state`/`nonce`, tanda tangan `id_token` (RS256) diverifikasi dengan JWKS IdP. SSO hanya membuktikan identitas: pengguna **harus sudah didaftarkan** super admin dengan email yang sama; peran dan unit tetap dari aplikasi (tanpa pembuatan akun otomatis). Hanya IdP berpenanda tangan RS256 yang didukung (Google, Entra, Keycloak default). Untuk Entra gunakan issuer spesifik tenant, bukan `common`. State login disimpan di memori proses (satu instance).
+- **SSO (OIDC)**: Authorization Code + PKCE, `state`/`nonce`, tanda tangan `id_token` (RS256) diverifikasi dengan JWKS IdP. SSO hanya membuktikan identitas: pengguna **harus sudah didaftarkan** super admin dengan email yang sama; peran dan unit tetap dari aplikasi (tanpa pembuatan akun otomatis). Hanya IdP berpenanda tangan RS256 yang didukung (Google, Entra, Keycloak default). Untuk Entra gunakan issuer spesifik tenant, bukan `common`. State login SSO yang sedang berjalan disimpan di database (sekali pakai, atomik), sehingga callback boleh dilayani proses server lain.
 
 ## Aturan bisnis
 
@@ -105,9 +105,13 @@ Approver tujuan dapat menolak setelah *Dikirim*: stok otomatis kembali ke unit a
 
 `db.js` skema SQLite · `auth.js` password/sesi/login/reset · `oidc.js` SSO · `mail.js` email · `transfer.js` transfer antar-unit · `kodebarang.js` referensi kode barang · `export.js` Excel/PDF · `app.js` logika bisnis, API & otorisasi · `server.js` HTTP, cookie, CSRF · `public/` UI · `test/` tes.
 
+## Menjalankan beberapa proses
+
+Beberapa proses server boleh berbagi satu berkas database di **mesin yang sama** (mode WAL + `busy_timeout`): sesi login, state SSO, dan pembatas percobaan (login gagal, lupa password) disimpan di database, bukan di memori, sehingga konsisten antar-proses di belakang load balancer. SQLite tidak cocok dibagi lewat jaringan (NFS) atau antar-mesin; untuk itu perlu server database terpisah.
+
 ## Keamanan
 
-Password di-hash scrypt; sesi berupa token acak (hanya hash-nya disimpan) di cookie `HttpOnly; SameSite=Strict`, berlaku 8 jam dan dicabut saat pengguna dinonaktifkan atau diubah. Login dikunci 5 menit setelah 5 kegagalan (per username+IP, di memori). Perlindungan CSRF: wajib `application/json` dan `Origin` harus sama dengan host. Aksi penting tercatat di log audit.
+Password di-hash scrypt; sesi berupa token acak (hanya hash-nya disimpan) di cookie `HttpOnly; SameSite=Strict`, berlaku 8 jam dan dicabut saat pengguna dinonaktifkan atau diubah. Login dikunci 5 menit setelah 5 kegagalan (per username+IP, disimpan di database). Perlindungan CSRF: wajib `application/json` dan `Origin` harus sama dengan host. Aksi penting tercatat di log audit.
 
 ## Belum ada (langkah lanjutan yang disarankan)
 

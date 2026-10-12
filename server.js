@@ -6,7 +6,7 @@ import { openDb } from './db.js';
 import { createApi } from './app.js';
 import { createAuth } from './auth.js';
 import { HttpError } from './errors.js';
-import { oidcFromEnv, SsoError } from './oidc.js';
+import { oidcFromEnv, sqliteStore, SsoError } from './oidc.js';
 import { createMailer } from './mail.js';
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), 'public');
@@ -29,7 +29,6 @@ export function createApp(db = openDb(), opts = {}) {
   const { oidc = null, mailer = null, baseUrl = 'http://localhost:3000', passwordLogin = true } = opts;
   const api = createApi(db);
   const auth = createAuth(db, { mailer, baseUrl, passwordLogin });
-  const lupaPerIp = new Map(); // ip -> [waktu]
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     const secure = process.env.COOKIE_SECURE === '1' || req.headers['x-forwarded-proto'] === 'https';
@@ -81,10 +80,8 @@ export function createApp(db = openDb(), opts = {}) {
           return send(200, { sso: oidc ? { label: oidc.label } : null, password_login: passwordLogin, reset_password: auth.resetTersedia });
         if (req.method === 'POST' && url.pathname === '/api/auth/lupa-password') {
           if (!auth.resetTersedia) throw new HttpError(503, 'Reset password mandiri belum dikonfigurasi; hubungi administrator');
-          const ip = req.socket.remoteAddress, now = Date.now();
-          const hist = (lupaPerIp.get(ip) ?? []).filter((t) => t > now - 3600e3);
-          if (hist.length >= 10) throw new HttpError(429, 'Terlalu banyak permintaan; coba lagi nanti');
-          lupaPerIp.set(ip, [...hist, now]);
+          const ip = req.socket.remoteAddress;
+          if (auth.hit(`lupa|${ip}`, 3600e3) > 10) throw new HttpError(429, 'Terlalu banyak permintaan; coba lagi nanti');
           auth.lupaPassword(body.identifier, ip);
           return send(200, { ok: true, pesan: 'Jika akun terdaftar dan memiliki email, tautan reset telah dikirim.' });
         }
@@ -145,10 +142,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.PORT) || 3000;
   const baseUrl = (process.env.BASE_URL || `http://localhost:${port}`).replace(/\/$/, '');
   const mailer = await createMailer();
-  const oidc = oidcFromEnv(process.env, baseUrl);
+  const db = openDb();
+  const oidc = oidcFromEnv(process.env, baseUrl, sqliteStore(db)); // state SSO di DB: callback boleh dilayani proses lain
   if (mailer.kind === 'console') console.warn('PERINGATAN: SMTP_HOST belum diisi — email reset password hanya dicetak di konsol (jangan untuk produksi).');
   if (process.env.NODE_ENV === 'production' && !process.env.BASE_URL) console.warn('PERINGATAN: BASE_URL belum diisi; tautan reset password akan mengarah ke localhost.');
-  const server = createApp(openDb(), { mailer, oidc, baseUrl, passwordLogin: process.env.PASSWORD_LOGIN !== 'off' });
+  const server = createApp(db, { mailer, oidc, baseUrl, passwordLogin: process.env.PASSWORD_LOGIN !== 'off' });
   const admin = server.auth.ensureAdmin();
   if (admin) {
     console.log(`Super admin dibuat — username: ${admin.username}${admin.generated ? `  password: ${admin.password}  (catat sekarang, tidak ditampilkan lagi)` : ''}`);

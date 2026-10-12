@@ -27,24 +27,33 @@ const RESET_MS = 30 * 60 * 1000;
 const RESET_MAKS_PER_JAM = 3;
 
 export function createAuth(db, { mailer = null, baseUrl = 'http://localhost:3000', passwordLogin = true, log = console } = {}) {
-  const gagal = new Map(); // "username|ip" -> { n, sampai }
+  // Pembatas percobaan disimpan di DB (bukan memori) supaya berlaku di semua proses server.
+  const baca = (kunci) => { const r = db.prepare('SELECT n, sampai FROM rate_limit WHERE kunci = ?').get(kunci); return r && r.sampai > Date.now() ? r : null; };
+  function hit(kunci, jendelaMs) { // menambah hitungan dalam jendela tetap; mengembalikan hitungan terbaru
+    const now = Date.now();
+    if (Math.random() < 0.05) db.prepare('DELETE FROM rate_limit WHERE sampai < ?').run(now);
+    const r = baca(kunci);
+    if (!r) { db.prepare('INSERT OR REPLACE INTO rate_limit (kunci, n, sampai) VALUES (?,1,?)').run(kunci, now + jendelaMs); return 1; }
+    db.prepare('UPDATE rate_limit SET n = n + 1 WHERE kunci = ?').run(kunci);
+    return r.n + 1;
+  }
   const audit = (user_id, aksi, detail = '') =>
     db.prepare('INSERT INTO audit_log (user_id, aksi, detail) VALUES (?,?,?)').run(user_id ?? null, aksi, detail);
   const publik = (u) => ({ id: u.id, username: u.username, nama: u.nama, role: u.role, unit_id: u.unit_id, unit_nama: u.unit_nama ?? null, unit_kode: u.unit_kode ?? null, email: u.email ?? null });
 
   function login(username, password, ip = '') {
     const key = `${String(username).toLowerCase()}|${ip}`;
-    const g = gagal.get(key);
-    if (g && g.n >= MAKS_GAGAL && Date.now() < g.sampai) throw new HttpError(429, 'Terlalu banyak percobaan gagal. Coba lagi beberapa menit lagi.');
+    const g = baca(`login|${key}`);
+    if (g && g.n >= MAKS_GAGAL) throw new HttpError(429, 'Terlalu banyak percobaan gagal. Coba lagi beberapa menit lagi.');
     const u = db.prepare(`SELECT u.*, un.nama AS unit_nama, un.kode AS unit_kode FROM users u LEFT JOIN units un ON un.id = u.unit_id
                           WHERE u.username = ?`).get(String(username));
     const ok = verifyPassword(String(password ?? ''), u ? u.password_hash : DUMMY) && u && u.aktif;
     if (!ok) {
-      gagal.set(key, { n: (g && Date.now() < g.sampai ? g.n : 0) + 1, sampai: Date.now() + KUNCI_MS });
+      hit(`login|${key}`, KUNCI_MS);
       audit(u?.id, 'login_gagal', String(username).slice(0, 64));
       throw new HttpError(401, 'Username atau password salah');
     }
-    gagal.delete(key);
+    db.prepare('DELETE FROM rate_limit WHERE kunci = ?').run(`login|${key}`);
     if (!passwordLogin && u.role !== 'SUPER_ADMIN') throw new HttpError(403, 'Login dengan password dinonaktifkan; gunakan SSO');
     audit(u.id, 'login');
     return buatSesi(u);
@@ -128,5 +137,5 @@ export function createAuth(db, { mailer = null, baseUrl = 'http://localhost:3000
     return { username, password: pw, generated: !password };
   }
 
-  return { login, loginSso, lupaPassword, resetPassword, userFromToken, logout, ubahPassword, ensureAdmin, audit, passwordLogin, resetTersedia: !!mailer };
+  return { hit, login, loginSso, lupaPassword, resetPassword, userFromToken, logout, ubahPassword, ensureAdmin, audit, passwordLogin, resetTersedia: !!mailer };
 }

@@ -20,6 +20,8 @@ const SCHEMA_VERSION = 5;
 export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
+  // Beberapa proses server boleh berbagi satu berkas: WAL mengizinkan pembaca bersamaan, busy_timeout menunggu penulis lain.
+  if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000');
   const lama = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'items'").get();
   const versi = db.prepare('PRAGMA user_version').get().user_version;
   if (lama && versi < 2)
@@ -65,6 +67,18 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
       token_hash TEXT PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       expires_at INTEGER NOT NULL             -- epoch ms
+    );
+    -- state bersama antar-proses: login SSO yang sedang berjalan dan pembatas percobaan (login gagal, lupa password)
+    CREATE TABLE IF NOT EXISTS sso_state (
+      state TEXT PRIMARY KEY,
+      nonce TEXT NOT NULL,
+      verifier TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS rate_limit (
+      kunci TEXT PRIMARY KEY,
+      n INTEGER NOT NULL,
+      sampai INTEGER NOT NULL                 -- akhir jendela (epoch ms)
     );
     CREATE TABLE IF NOT EXISTS audit_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
