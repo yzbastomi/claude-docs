@@ -78,7 +78,9 @@ test('xlsx transaksi, kartu stok (saldo berjalan), tren (2 sheet), opname, trans
   assert.ok(baris(tx).some((r) => r[0] === 'Total'), 'total nilai muncul saat jenis difilter');
 
   const ks = (await bacaXlsx(await toXlsx(susunData('kartu-stok', api, { item_id: a.id }, U.opFeb)))).getWorksheet('Kartu Stok');
-  assert.deepEqual(baris(ks).filter((r) => r[0] instanceof Date).map((r) => r[6]), [10, 6]);
+  const hdrKs = baris(ks).find((r) => r[0] === 'Tanggal'), iSaldo = hdrKs.indexOf('Saldo');
+  assert.ok(hdrKs.includes('Gudang'), 'kolom Gudang ada pada kartu stok semua-gudang');
+  assert.deepEqual(baris(ks).filter((r) => r[0] instanceof Date).map((r) => r[iSaldo]), [10, 6]);
   assert.throws(() => susunData('kartu-stok', api, { item_id: a.id }, U.opFt), (e) => e.status === 404);
 
   const tren = await bacaXlsx(await toXlsx(susunData('tren', api, { bulan: 6 }, U.opFeb)));
@@ -151,4 +153,40 @@ test('HTTP: wajib login, unduhan berkas dengan header benar, isolasi unit, terca
     const log = c.db.prepare("SELECT detail FROM audit_log WHERE aksi = 'ekspor' ORDER BY id").all().map((r) => r.detail);
     assert.deepEqual(log, ['stok.xlsx', 'stok.pdf']);
   } finally { server.close(); }
+});
+
+test('ekspor multi-gudang: rincian per gudang, laporan satu gudang dinilai dari stok gudang itu, kolom gudang pada transaksi & kartu stok', async () => {
+  const c = setup(); const api = createApi(c.db);
+  const login = (u) => c.auth.login(u, 'rahasia123').user;
+  const op = login('op.feb'), feb = c.as(c.u.opFeb);
+  const gd2 = feb('POST', '/api/gudang', { kode: 'GD2', nama: 'Gudang Dua' });
+  const a = feb('POST', '/api/items', { kode: 'A', nama: 'Kertas', satuan: 'rim' });
+  const b = feb('POST', '/api/items', { kode: 'B', nama: 'Tinta', satuan: 'pcs' });
+  catat(c, { kategori: 'pembelian', item_id: a.id, qty: 10, harga_satuan: 1000 });
+  catat(c, { kategori: 'pembelian', item_id: a.id, qty: 4, harga_satuan: 1000, gudang_id: gd2.id });
+  catat(c, { kategori: 'pembelian', item_id: b.id, qty: 3, harga_satuan: 500 }); // B hanya di gudang utama
+
+  const semua = (await bacaXlsx(await toXlsx(susunData('stok', api, {}, op)))).getWorksheet('Stok');
+  const hdr = baris(semua).find((r) => r[0] === 'Kode');
+  assert.ok(hdr.includes('Rincian Gudang'));
+  assert.ok(baris(semua).some((r) => r[0] === 'A' && r.includes('UTAMA: 10; GD2: 4')));
+
+  const ds = susunData('stok', api, { gudang_id: gd2.id }, op);
+  assert.equal(ds.judul, 'Laporan Stok Gudang GD2');
+  assert.deepEqual(ds.bagian[0].baris.map((r) => r.kode), ['A'], 'barang B tidak berstok di GD2');
+  assert.equal(ds.bagian[0].baris[0].nilai, 4000, 'nilai = stok gudang × harga rata-rata, bukan total barang');
+  const g2 = (await bacaXlsx(await toXlsx(ds))).getWorksheet('Stok GD2');
+  assert.ok(baris(g2).find((r) => r[0] === 'Kode').includes('Stok di GD2'));
+  assert.ok(!baris(g2).find((r) => r[0] === 'Kode').includes('Status'));
+  const tot = baris(g2).find((r) => r[0] === 'Total');
+  assert.equal(tot.find((v) => v && v.result !== undefined).result, 4000);
+  assert.ok(g2.getCell('A4').value === 'Gudang' && /GD2 - Gudang Dua/.test(g2.getCell('B4').value));
+
+  const tx = (await bacaXlsx(await toXlsx(susunData('transaksi', api, {}, op)))).getWorksheet('Transaksi');
+  assert.ok(baris(tx).find((r) => r[0] === 'Tanggal').includes('Gudang'));
+  const txG = susunData('transaksi', api, { gudang_id: gd2.id }, op).bagian[0];
+  assert.equal(txG.baris.length, 1); assert.equal(txG.baris[0].gudang_kode, 'GD2');
+  const ks = susunData('kartu-stok', api, { item_id: a.id, gudang_id: gd2.id }, op);
+  assert.ok(ks.info.some(([l, v]) => l === 'Gudang' && /GD2/.test(v)) && ks.info.some(([l, v]) => l === 'Stok akhir' && v.startsWith('4 ')));
+  assert.ok(!ks.bagian[0].kolom.some((k) => k.k === 'gudang_kode'), 'kolom gudang tak perlu bila sudah difilter');
 });

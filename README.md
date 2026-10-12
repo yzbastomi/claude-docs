@@ -48,6 +48,7 @@ Saat database masih kosong, server membuat akun **super admin** (`ADMIN_USERNAME
 |---|---|
 | Barang | Kode, nama, kategori, satuan, stok minimum, aktif/nonaktif |
 | Kode Barang (super admin) | Referensi kode barang persediaan 10 digit gaya SAKTI, pohon 5 tingkat, tambah satuan atau impor massal |
+| Gudang | Banyak gudang per unit (satu gudang utama otomatis), stok per gudang, **mutasi** antar gudang dengan persetujuan approver |
 | Persetujuan | Antrian transaksi & opname untuk approver unit |
 | Transaksi Masuk | Pembelian, hibah masuk, transfer masuk, perolehan lainnya |
 | Transaksi Keluar | Pemakaian, hibah keluar, transfer keluar (ditolak jika stok tidak cukup) |
@@ -55,6 +56,18 @@ Saat database masih kosong, server membuat akun **super admin** (`ADMIN_USERNAME
 | Dashboard | Stok kosong, stok menipis (≤ minimum), nilai persediaan |
 | Ekspor | Excel (.xlsx) & PDF untuk stok (juga kosong/menipis), transaksi (rentang tanggal), kartu stok, lembar opname (dengan kolom tanda tangan), transfer, tren pemakaian, dan kode barang |
 | Laporan | Tren barang keluar per bulan, pemakaian terbanyak + perkiraan hari stok habis, kartu stok per barang |
+
+## Multi-gudang per unit
+
+Setiap unit otomatis punya satu **Gudang Utama**; operator menambah gudang lain di menu **Gudang**. Tanpa gudang kedua semua layar tampil seperti biasa (pilihan gudang disembunyikan).
+
+- **Stok dihitung per gudang**; pada daftar barang `stok` = total semua gudang dan ada rincian per gudang. Pengeluaran dibatasi oleh stok **gudang yang dipilih** (total cukup belum tentu cukup), dan stok tidak boleh negatif di gudang mana pun, termasuk saat persetujuan atau tanggal mundur. **Harga rata-rata dan nilai persediaan tetap per barang.**
+- Transaksi masuk/keluar, opname, dan transfer antar-unit memilih gudang (default gudang utama). Transfer antar-unit: gudang asal dipilih pengaju, **gudang tujuan dipilih operator penerima**; barang yang ditolak atau selisih penerimaan kembali ke **gudang asal**.
+- **Mutasi antar gudang** (satu unit): operator mengajukan, approver menyetujui, sistem membuat dua transaksi tertaut (`mutasi_keluar` / `mutasi_masuk`) pada harga rata-rata sehingga nilai persediaan tidak berubah. Stok dicek ulang saat persetujuan. Mutasi tidak dihitung sebagai pemakaian pada tren.
+- **Opname per gudang**: satu opname per gudang per periode; stok sistem dan penyesuaian hanya untuk gudang itu. Finalisasi menunggu transaksi/mutasi yang tertunda di gudang tersebut.
+- Gudang berstok atau yang masih punya transaksi/mutasi tertunda tidak dapat dinonaktifkan; gudang utama tidak dapat dinonaktifkan/dihapus (jadikan gudang lain sebagai utama dulu); gudang yang punya riwayat hanya dinonaktifkan.
+- Laporan (tren, kartu stok) dan ekspor dapat difilter per gudang; ekspor stok semua gudang menambah kolom *Rincian Gudang*, ekspor satu gudang menilai dari stok gudang itu.
+- Migrasi dari versi sebelumnya otomatis: semua data lama masuk ke gudang utama masing-masing unit (tabel opname dibangun ulang karena batas keunikannya kini memuat gudang; baris opname tetap utuh).
 
 ## Ekspor Excel & PDF
 
@@ -113,7 +126,7 @@ Menggunakan pengirim email yang sama dengan reset password (`SMTP_*`; tanpa SMTP
 
 ## Struktur
 
-`db.js` skema SQLite · `auth.js` password/sesi/login/reset · `oidc.js` SSO · `mail.js` email · `notif.js` notifikasi · `transfer.js` transfer antar-unit · `kodebarang.js` referensi kode barang · `export.js` Excel/PDF · `app.js` logika bisnis, API & otorisasi · `server.js` HTTP, cookie, CSRF · `public/` UI · `test/` tes.
+`db.js` skema SQLite · `auth.js` password/sesi/login/reset · `oidc.js` SSO · `mail.js` email · `notif.js` notifikasi · `transfer.js` transfer antar-unit · `kodebarang.js` referensi kode barang · `gudang.js` gudang & mutasi · `export.js` Excel/PDF · `app.js` logika bisnis, API & otorisasi · `server.js` HTTP, cookie, CSRF · `public/` UI · `test/` tes.
 
 ## Menjalankan beberapa proses
 
@@ -125,4 +138,4 @@ Password di-hash scrypt; sesi berupa token acak (hanya hash-nya disimpan) di coo
 
 ## Belum ada (langkah lanjutan yang disarankan)
 
-multi-gudang per unit, ekspor Excel/PDF, upload lampiran dokumen, batch/kedaluwarsa.
+Upload lampiran dokumen (BAST/faktur), batch dan tanggal kedaluwarsa, stok minimum per gudang, server database terpisah untuk penyebaran antar-mesin.

@@ -11,12 +11,17 @@
 const SA = 'SUPER_ADMIN', OP = 'OPERATOR', AP = 'APPROVER';
 
 export function transferRoutes(ctx) {
-  const { all, get, run, tx, audit, need, stokItem, itemUntuk, assertNoNegative, insertTx, bad, str, num, isDate, today, HttpError, kabari, penerima, iso } = ctx;
+  const { all, get, run, tx, audit, need, stokItem, itemUntuk, assertNoNegative, insertTx, bad, str, num, isDate, today, HttpError, kabari, penerima, iso, stokDi, gudangUntuk, gudangUtama } = ctx;
 
   const SELECT = `SELECT t.*, ua.kode AS unit_asal_kode, ua.nama AS unit_asal_nama, ut.kode AS unit_tujuan_kode, ut.nama AS unit_tujuan_nama,
-      ia.kode AS item_asal_kode, ia.nama AS item_asal_nama, ia.satuan AS satuan, it.kode AS item_tujuan_kode, it.nama AS item_tujuan_nama
+      ia.kode AS item_asal_kode, ia.nama AS item_asal_nama, ia.satuan AS satuan, it.kode AS item_tujuan_kode, it.nama AS item_tujuan_nama,
+      ga.kode AS gudang_asal_kode, gt.kode AS gudang_tujuan_kode
     FROM transfers t JOIN units ua ON ua.id = t.unit_asal_id JOIN units ut ON ut.id = t.unit_tujuan_id
-    JOIN items ia ON ia.id = t.item_asal_id LEFT JOIN items it ON it.id = t.item_tujuan_id`;
+    JOIN items ia ON ia.id = t.item_asal_id LEFT JOIN items it ON it.id = t.item_tujuan_id
+    LEFT JOIN gudang ga ON ga.id = t.gudang_asal_id LEFT JOIN gudang gt ON gt.id = t.gudang_tujuan_id`;
+  // gudang efektif (data lama tanpa gudang = gudang utama unit)
+  const gAsal = (t) => t.gudang_asal_id ?? gudangUtama(t.unit_asal_id);
+  const gTujuan = (t) => t.gudang_tujuan_id ?? gudangUtama(t.unit_tujuan_id);
 
   const visible = (u, t) => u.role === SA || t.unit_asal_id === u.unit_id || t.unit_tujuan_id === u.unit_id;
   // Aksi yang boleh dilakukan user pada transfer (dipakai server untuk otorisasi & klien untuk tombol)
@@ -64,11 +69,13 @@ export function transferRoutes(ctx) {
       if (!tujuan || tujuan.id === user.unit_id) throw bad('Unit tujuan tidak valid');
       const qty = num(body.qty, 'Jumlah');
       if (qty <= 0) throw bad('Jumlah harus lebih dari 0');
-      if (qty > item.stok + 1e-9) throw bad(`Stok tersedia hanya ${item.stok}`);
+      const gudang = gudangUntuk(user, body.gudang_asal_id || gudangUtama(user.unit_id), { aktif: true });
+      const tersedia = stokDi(item.id, gudang.id);
+      if (qty > tersedia + 1e-9) throw bad(`Stok tersedia di gudang ${gudang.kode} hanya ${tersedia}`);
       const tanggal = str(body.tanggal) || today();
       if (!isDate(tanggal)) throw bad('Format tanggal harus YYYY-MM-DD');
-      const r = run(`INSERT INTO transfers (unit_asal_id, unit_tujuan_id, item_asal_id, qty, tanggal, no_dokumen, keterangan, dibuat_oleh)
-                     VALUES (?,?,?,?,?,?,?,?)`, user.unit_id, tujuan.id, item.id, qty, tanggal, str(body.no_dokumen), str(body.keterangan), user.id);
+      const r = run(`INSERT INTO transfers (unit_asal_id, unit_tujuan_id, item_asal_id, gudang_asal_id, qty, tanggal, no_dokumen, keterangan, dibuat_oleh)
+                     VALUES (?,?,?,?,?,?,?,?,?)`, user.unit_id, tujuan.id, item.id, gudang.id, qty, tanggal, str(body.no_dokumen), str(body.keterangan), user.id);
       kabari(penerima(user.unit_id, 'APPROVER'));
       audit(user, 'transfer_ajukan', `#${r.lastInsertRowid} ${item.kode} x${qty} → ${tujuan.kode}`);
       return [201, withAksi(user, load(user, r.lastInsertRowid))];
@@ -87,6 +94,7 @@ export function transferRoutes(ctx) {
         audit(user, 'transfer_batal', `#${t.id}`);
       } else if (aksi === 'terima') {
         const asal = get('SELECT * FROM items WHERE id = ?', t.item_asal_id);
+        const gudangT = gudangUntuk(user, body.gudang_id || gudangUtama(user.unit_id), { aktif: true });
         const diterima = body.qty_diterima == null || body.qty_diterima === '' ? t.qty : num(body.qty_diterima, 'Jumlah diterima');
         if (!(diterima > 0) || diterima > t.qty + 1e-9) throw bad(`Jumlah diterima harus lebih dari 0 dan paling banyak ${t.qty}`);
         const qtyTerima = Math.abs(diterima - t.qty) < 1e-9 ? t.qty : diterima;
@@ -105,17 +113,17 @@ export function transferRoutes(ctx) {
           if (body.buat_item_baru)
             tujuanId = Number(run('INSERT INTO items (unit_id, kode, nama, kategori, satuan, stok_minimum, kode_barang) VALUES (?,?,?,?,?,0,?)',
               user.unit_id, asal.kode, asal.nama, asal.kategori, asal.satuan, asal.kode_barang).lastInsertRowid);
-          setStatus(t.id, 'DIPERIKSA', ', item_tujuan_id = ?, diterima_oleh = ?, qty_diterima = ?, catatan_penerimaan = ?', tujuanId, user.id, qtyTerima, qtyTerima < t.qty ? catatan : '');
+          setStatus(t.id, 'DIPERIKSA', ', item_tujuan_id = ?, gudang_tujuan_id = ?, diterima_oleh = ?, qty_diterima = ?, catatan_penerimaan = ?', tujuanId, gudangT.id, user.id, qtyTerima, qtyTerima < t.qty ? catatan : '');
         });
         kabari(penerima(t.unit_tujuan_id, 'APPROVER'));
         audit(user, 'transfer_terima', `#${t.id} ${qtyTerima}/${t.qty}`);
       } else if (aksi === 'setujui') {
         if (t.status === 'DIAJUKAN') {
           tx(() => {
-            const item = stokItem(t.item_asal_id);
-            if (t.qty > item.stok + 1e-9) throw bad(`Stok tersedia hanya ${item.stok}`);
+            const item = stokItem(t.item_asal_id), tersedia = stokDi(t.item_asal_id, gAsal(t));
+            if (t.qty > tersedia + 1e-9) throw bad(`Stok tersedia hanya ${tersedia}`);
             insertTx({
-              tanggal: t.tanggal, jenis: 'KELUAR', kategori: 'transfer_keluar', item_id: t.item_asal_id, qty: t.qty, harga_satuan: item.harga_rata,
+              tanggal: t.tanggal, jenis: 'KELUAR', kategori: 'transfer_keluar', item_id: t.item_asal_id, gudang_id: gAsal(t), qty: t.qty, harga_satuan: item.harga_rata,
               pihak: t.unit_tujuan_nama, no_dokumen: t.no_dokumen, keterangan: `Transfer #${t.id} ke ${t.unit_tujuan_kode}`,
             }, { status: 'DISETUJUI', dibuat_oleh: t.dibuat_oleh, diputuskan_oleh: user.id, transfer_id: t.id });
             assertNoNegative(t.item_asal_id);
@@ -127,12 +135,12 @@ export function transferRoutes(ctx) {
           const diterima = t.qty_diterima ?? t.qty, selisih = t.qty - diterima; // NULL = data sebelum fitur sebagian
           tx(() => {
             insertTx({
-              tanggal: today(), jenis: 'MASUK', kategori: 'transfer_masuk', item_id: t.item_tujuan_id, qty: diterima, harga_satuan: t.harga_satuan,
+              tanggal: today(), jenis: 'MASUK', kategori: 'transfer_masuk', item_id: t.item_tujuan_id, gudang_id: gTujuan(t), qty: diterima, harga_satuan: t.harga_satuan,
               pihak: t.unit_asal_nama, no_dokumen: t.no_dokumen, keterangan: `Transfer #${t.id} dari ${t.unit_asal_kode}`,
             }, { status: 'DISETUJUI', dibuat_oleh: t.diterima_oleh, diputuskan_oleh: user.id, transfer_id: t.id });
             if (selisih > 1e-9) // sisa yang tidak diterima kembali ke unit asal
               insertTx({
-                tanggal: today(), jenis: 'MASUK', kategori: 'transfer_masuk', item_id: t.item_asal_id, qty: selisih, harga_satuan: t.harga_satuan,
+                tanggal: today(), jenis: 'MASUK', kategori: 'transfer_masuk', item_id: t.item_asal_id, gudang_id: gAsal(t), qty: selisih, harga_satuan: t.harga_satuan,
                 pihak: t.unit_tujuan_nama, no_dokumen: t.no_dokumen,
                 keterangan: `Pengembalian selisih transfer #${t.id} (diterima ${diterima} dari ${t.qty}): ${t.catatan_penerimaan}`,
               }, { status: 'DISETUJUI', dibuat_oleh: t.dibuat_oleh, diputuskan_oleh: user.id, transfer_id: t.id });
@@ -150,7 +158,7 @@ export function transferRoutes(ctx) {
         } else { // barang sudah keluar dari asal: kembalikan stoknya
           tx(() => {
             insertTx({
-              tanggal: today(), jenis: 'MASUK', kategori: 'transfer_masuk', item_id: t.item_asal_id, qty: t.qty, harga_satuan: t.harga_satuan,
+              tanggal: today(), jenis: 'MASUK', kategori: 'transfer_masuk', item_id: t.item_asal_id, gudang_id: gAsal(t), qty: t.qty, harga_satuan: t.harga_satuan,
               pihak: t.unit_tujuan_nama, no_dokumen: t.no_dokumen, keterangan: `Pengembalian transfer #${t.id} (ditolak ${t.unit_tujuan_kode})`,
             }, { status: 'DISETUJUI', dibuat_oleh: t.dibuat_oleh, diputuskan_oleh: user.id, transfer_id: t.id });
             setStatus(t.id, 'DIKEMBALIKAN', ', catatan_keputusan = ?, disetujui_tujuan_oleh = ?', catatan, user.id);

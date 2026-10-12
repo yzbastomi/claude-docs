@@ -43,6 +43,8 @@ export function createNotifier(db, { mailer, baseUrl = 'http://localhost:3000', 
       if (tx) aksi.push(`${tx} transaksi menunggu persetujuan  ->  ${baseUrl}/#persetujuan`);
       if (op) aksi.push(`${op} stok opname menunggu persetujuan  ->  ${baseUrl}/#persetujuan`);
       if (tr) aksi.push(`${tr} transfer antar-unit menunggu keputusan  ->  ${baseUrl}/#persetujuan`);
+      const mu = n("SELECT COUNT(*) AS n FROM mutasi WHERE unit_id = ? AND status = 'MENUNGGU'", unit);
+      if (mu) aksi.push(`${mu} mutasi antar gudang menunggu persetujuan  ->  ${baseUrl}/#persetujuan`);
     } else if (u.role === 'OPERATOR') {
       const terima = n("SELECT COUNT(*) AS n FROM transfers WHERE unit_tujuan_id = ? AND status = 'DIKIRIM'", unit);
       const balik = n("SELECT COUNT(*) AS n FROM opnames WHERE unit_id = ? AND status = 'DRAFT' AND catatan_keputusan <> ''", unit);
@@ -59,6 +61,10 @@ export function createNotifier(db, { mailer, baseUrl = 'http://localhost:3000', 
         for (const t of tolak.slice(0, 10)) hasil.push(`   - ${t.tanggal} ${LABEL[t.kategori] ?? t.kategori} ${t.nama} x${t.qty} ${t.satuan}: ${t.catatan_keputusan}`);
         if (tolak.length > 10) hasil.push(`   ... dan ${tolak.length - 10} lainnya  ->  ${baseUrl}/#masuk`);
       }
+      for (const mu of all(`SELECT m.status, m.qty, m.catatan_keputusan, i.nama, i.satuan, ga.kode AS asal, gt.kode AS tujuan FROM mutasi m JOIN items i ON i.id = m.item_id
+                            JOIN gudang ga ON ga.id = m.gudang_asal_id JOIN gudang gt ON gt.id = m.gudang_tujuan_id
+                            WHERE m.dibuat_oleh = ? AND m.status IN ('DISETUJUI','DITOLAK') AND m.diputuskan_at > ?`, u.id, sejak))
+        hasil.push(`Mutasi ${mu.nama} x${mu.qty} ${mu.satuan} (${mu.asal} -> ${mu.tujuan}) ${mu.status === 'DISETUJUI' ? 'disetujui' : `ditolak: ${mu.catatan_keputusan}`}`);
       for (const o of all("SELECT tipe, periode, status, catatan_keputusan FROM opnames WHERE dibuat_oleh = ? AND diputuskan_at > ?", u.id, sejak))
         hasil.push(o.status === 'FINAL' ? `Opname ${o.tipe.toLowerCase()} ${o.periode} disetujui dan difinalisasi` : `Opname ${o.tipe.toLowerCase()} ${o.periode} dikembalikan: ${o.catatan_keputusan}`);
       for (const t of all(`SELECT t.id, t.status, t.qty, t.qty_diterima, t.catatan_keputusan, ua.kode AS asal, ut.kode AS tujuan, i.nama FROM transfers t

@@ -13,9 +13,71 @@ export const KATEGORI = {
   hibah_keluar: 'KELUAR',
   transfer_keluar: 'KELUAR',
   penyesuaian_keluar: 'KELUAR', // dibuat otomatis oleh stok opname
+  mutasi_keluar: 'KELUAR',      // dibuat otomatis oleh mutasi antar gudang dalam satu unit
+  mutasi_masuk: 'MASUK',
 };
+// Kategori yang hanya boleh dibuat sistem (bukan input manual operator)
+export const KATEGORI_SISTEM = (k) => k.startsWith('penyesuaian') || k.startsWith('mutasi');
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
+
+// Gudang: satu unit boleh punya banyak gudang; tepat satu bertanda "utama" (default untuk input baru).
+const GUDANG_DDL = `
+  CREATE TABLE IF NOT EXISTS gudang (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    unit_id INTEGER NOT NULL REFERENCES units(id),
+    kode TEXT NOT NULL,
+    nama TEXT NOT NULL,
+    utama INTEGER NOT NULL DEFAULT 0,
+    aktif INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (unit_id, kode)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_gudang_utama ON gudang(unit_id) WHERE utama = 1;`;
+// Opname per gudang: batas keunikan memuat gudang_id (karena itu tabel dibangun ulang saat migrasi)
+const OPNAMES_DDL = (nama) => `CREATE TABLE ${nama} (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  unit_id INTEGER NOT NULL REFERENCES units(id),
+  gudang_id INTEGER NOT NULL REFERENCES gudang(id),
+  tipe TEXT NOT NULL CHECK (tipe IN ('BULANAN','SEMESTER')),
+  periode TEXT NOT NULL,               -- 2026-09 atau 2026-S1
+  tanggal TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','DIAJUKAN','FINAL')),
+  catatan TEXT NOT NULL DEFAULT '',
+  catatan_keputusan TEXT NOT NULL DEFAULT '',
+  dibuat_oleh INTEGER REFERENCES users(id),
+  diputuskan_oleh INTEGER REFERENCES users(id),
+  diputuskan_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (unit_id, gudang_id, tipe, periode)
+)`;
+
+// v7: multi-gudang. Dijalankan dalam satu transaksi; foreign key dimatikan agar DROP TABLE tidak menghapus opname_lines lewat cascade.
+function migrasiGudang(db, has, adaTabel) {
+  db.exec('PRAGMA foreign_keys = OFF');
+  db.exec('BEGIN');
+  try {
+    db.exec(GUDANG_DDL);
+    db.exec("INSERT INTO gudang (unit_id, kode, nama, utama) SELECT id, 'UTAMA', 'Gudang Utama', 1 FROM units WHERE id NOT IN (SELECT unit_id FROM gudang)");
+    if (!has('transactions', 'gudang_id')) db.exec('ALTER TABLE transactions ADD COLUMN gudang_id INTEGER');
+    if (!has('transactions', 'mutasi_id')) db.exec('ALTER TABLE transactions ADD COLUMN mutasi_id INTEGER');
+    db.exec(`UPDATE transactions SET gudang_id = (SELECT g.id FROM gudang g JOIN items i ON i.unit_id = g.unit_id AND g.utama = 1 WHERE i.id = transactions.item_id) WHERE gudang_id IS NULL`);
+    if (adaTabel('transfers')) {
+      if (!has('transfers', 'gudang_asal_id')) db.exec('ALTER TABLE transfers ADD COLUMN gudang_asal_id INTEGER');
+      if (!has('transfers', 'gudang_tujuan_id')) db.exec('ALTER TABLE transfers ADD COLUMN gudang_tujuan_id INTEGER');
+      db.exec(`UPDATE transfers SET gudang_asal_id = (SELECT id FROM gudang WHERE unit_id = transfers.unit_asal_id AND utama = 1) WHERE gudang_asal_id IS NULL;
+               UPDATE transfers SET gudang_tujuan_id = (SELECT id FROM gudang WHERE unit_id = transfers.unit_tujuan_id AND utama = 1)
+                 WHERE gudang_tujuan_id IS NULL AND status IN ('DIPERIKSA','DITERIMA')`);
+    }
+    if (adaTabel('opnames') && !has('opnames', 'gudang_id')) {
+      db.exec(OPNAMES_DDL('opnames_baru'));
+      db.exec(`INSERT INTO opnames_baru (id, unit_id, gudang_id, tipe, periode, tanggal, status, catatan, catatan_keputusan, dibuat_oleh, diputuskan_oleh, diputuskan_at, created_at)
+               SELECT o.id, o.unit_id, (SELECT g.id FROM gudang g WHERE g.unit_id = o.unit_id AND g.utama = 1), o.tipe, o.periode, o.tanggal, o.status, o.catatan,
+                      o.catatan_keputusan, o.dibuat_oleh, o.diputuskan_oleh, o.diputuskan_at, o.created_at FROM opnames o`);
+      db.exec('DROP TABLE opnames; ALTER TABLE opnames_baru RENAME TO opnames');
+    }
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; } finally { db.exec('PRAGMA foreign_keys = ON'); }
+}
 
 export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -39,6 +101,7 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
     if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'transfers'").get() && !has('transfers', 'qty_diterima')) { // v5: penerimaan sebagian
       db.exec("ALTER TABLE transfers ADD COLUMN qty_diterima REAL; ALTER TABLE transfers ADD COLUMN catatan_penerimaan TEXT NOT NULL DEFAULT ''");
     }
+    migrasiGudang(db, has, (n) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(n)); // v7
   }
   db.exec(`
     PRAGMA foreign_keys = ON;
@@ -48,6 +111,9 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
       nama TEXT NOT NULL,
       aktif INTEGER NOT NULL DEFAULT 1
     );
+    ${GUDANG_DDL}
+    CREATE TRIGGER IF NOT EXISTS trg_unit_gudang AFTER INSERT ON units   -- setiap unit selalu punya gudang utama
+    BEGIN INSERT INTO gudang (unit_id, kode, nama, utama) VALUES (NEW.id, 'UTAMA', 'Gudang Utama', 1); END;
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -138,8 +204,31 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
       diputuskan_at TEXT,
       catatan_keputusan TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      transfer_id INTEGER
+      transfer_id INTEGER,
+      gudang_id INTEGER REFERENCES gudang(id),   -- NULL saat INSERT = gudang utama unit (diisi trigger)
+      mutasi_id INTEGER
     );
+    CREATE TRIGGER IF NOT EXISTS trg_tx_gudang AFTER INSERT ON transactions WHEN NEW.gudang_id IS NULL
+    BEGIN UPDATE transactions SET gudang_id = (SELECT g.id FROM gudang g JOIN items i ON i.unit_id = g.unit_id WHERE i.id = NEW.item_id AND g.utama = 1) WHERE id = NEW.id; END;
+    CREATE INDEX IF NOT EXISTS idx_tx_gudang ON transactions(gudang_id, item_id);
+    CREATE TABLE IF NOT EXISTS mutasi (   -- perpindahan barang antar gudang dalam satu unit (perlu persetujuan approver unit)
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      unit_id INTEGER NOT NULL REFERENCES units(id),
+      item_id INTEGER NOT NULL REFERENCES items(id),
+      gudang_asal_id INTEGER NOT NULL REFERENCES gudang(id),
+      gudang_tujuan_id INTEGER NOT NULL REFERENCES gudang(id),
+      qty REAL NOT NULL CHECK (qty > 0),
+      tanggal TEXT NOT NULL,
+      keterangan TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'MENUNGGU' CHECK (status IN ('MENUNGGU','DISETUJUI','DITOLAK')),
+      dibuat_oleh INTEGER REFERENCES users(id),
+      diputuskan_oleh INTEGER REFERENCES users(id),
+      diputuskan_at TEXT,
+      catatan_keputusan TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      CHECK (gudang_asal_id <> gudang_tujuan_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_mutasi_unit ON mutasi(unit_id, status);
     CREATE INDEX IF NOT EXISTS idx_tx_transfer ON transactions(transfer_id);
     CREATE INDEX IF NOT EXISTS idx_tx_item ON transactions(item_id, tanggal);
     CREATE INDEX IF NOT EXISTS idx_tx_tanggal ON transactions(tanggal);
@@ -166,25 +255,13 @@ export function openDb(file = process.env.DB_FILE || 'data/stok.db') {
       disetujui_tujuan_oleh INTEGER REFERENCES users(id),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT,                               -- ISO, setiap perubahan status
+      gudang_asal_id INTEGER REFERENCES gudang(id),  -- gudang pengirim (NULL = utama)
+      gudang_tujuan_id INTEGER REFERENCES gudang(id),-- dipilih operator tujuan saat penerimaan (NULL = utama)
       CHECK (unit_asal_id <> unit_tujuan_id)
     );
     CREATE INDEX IF NOT EXISTS idx_tr_asal ON transfers(unit_asal_id, status);
     CREATE INDEX IF NOT EXISTS idx_tr_tujuan ON transfers(unit_tujuan_id, status);
-    CREATE TABLE IF NOT EXISTS opnames (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      unit_id INTEGER NOT NULL REFERENCES units(id),
-      tipe TEXT NOT NULL CHECK (tipe IN ('BULANAN','SEMESTER')),
-      periode TEXT NOT NULL,               -- 2026-09 atau 2026-S1
-      tanggal TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','DIAJUKAN','FINAL')),
-      catatan TEXT NOT NULL DEFAULT '',
-      catatan_keputusan TEXT NOT NULL DEFAULT '',
-      dibuat_oleh INTEGER REFERENCES users(id),
-      diputuskan_oleh INTEGER REFERENCES users(id),
-      diputuskan_at TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      UNIQUE (unit_id, tipe, periode)
-    );
+    ${OPNAMES_DDL('IF NOT EXISTS opnames')};
     CREATE TABLE IF NOT EXISTS opname_lines (
       opname_id INTEGER NOT NULL REFERENCES opnames(id) ON DELETE CASCADE,
       item_id INTEGER NOT NULL REFERENCES items(id),

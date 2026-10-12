@@ -191,3 +191,22 @@ test('migrasi v5 → v6 menambah kolom notifikasi', async () => {
   b.prepare('SELECT diputuskan_at FROM opnames').all(); b.prepare('SELECT updated_at FROM transfers').all(); b.prepare('SELECT * FROM notif_tunda').all();
   assert.equal(b.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
 });
+
+test('mutasi antar gudang: approver diberi tahu antrean; operator menerima hasil (disetujui / ditolak beserta alasan)', async () => {
+  const t = siap(); const { c } = t; const feb = t.as(c.u.opFeb), apFeb = t.as(c.u.apFeb);
+  const gd2 = feb('POST', '/api/gudang', { kode: 'GD2', nama: 'Dua' });
+  const utama = feb('GET', '/api/gudang')[0];
+  const a = feb('POST', '/api/items', { kode: 'A', nama: 'Kertas', satuan: 'rim' });
+  const t0 = feb('POST', '/api/transaksi', { kategori: 'pembelian', item_id: a.id, qty: 10 }); apFeb('POST', `/api/transaksi/${t0.id}/setujui`);
+  await t.maju(JEDA + 1); t.surat.length = 0;
+  const m1 = feb('POST', '/api/mutasi', { item_id: a.id, gudang_asal_id: utama.id, gudang_tujuan_id: gd2.id, qty: 3 });
+  const m2 = feb('POST', '/api/mutasi', { item_id: a.id, gudang_asal_id: utama.id, gudang_tujuan_id: gd2.id, qty: 2 });
+  await t.maju(JEDA + 1);
+  assert.deepEqual(t.surat.map((s) => s.to), ['ap.feb@k.id']);
+  assert.match(t.surat[0].text, /2 mutasi antar gudang menunggu persetujuan/); t.surat.length = 0;
+  apFeb('POST', `/api/mutasi/${m1.id}/setujui`); apFeb('POST', `/api/mutasi/${m2.id}/tolak`, { catatan: 'Rak penuh' });
+  await t.maju(JEDA + 1);
+  assert.deepEqual(t.surat.map((s) => s.to), ['op.feb@k.id']);
+  assert.match(t.surat[0].text, /Mutasi Kertas x3 rim \(UTAMA -> GD2\) disetujui/);
+  assert.match(t.surat[0].text, /Mutasi Kertas x2 rim \(UTAMA -> GD2\) ditolak: Rak penuh/);
+});

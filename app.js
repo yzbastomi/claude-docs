@@ -1,7 +1,8 @@
-import { KATEGORI, STOK_SQL } from './db.js';
+import { KATEGORI, KATEGORI_SISTEM, STOK_SQL } from './db.js';
 import { HttpError } from './errors.js';
 import { hashPassword, validPassword } from './auth.js';
 import { transferRoutes } from './transfer.js';
+import { createGudang } from './gudang.js';
 import { createKodeBarang, normalisasi, formatKode } from './kodebarang.js';
 
 export { HttpError };
@@ -47,14 +48,42 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
     const harga_rata = r.qty_masuk > 0 ? r.nilai_masuk / r.qty_masuk : 0;
     return { ...r, harga_rata, nilai: Math.max(r.stok, 0) * harga_rata, status: status(r.stok, r.stok_minimum) };
   };
-  function stokList({ unit = null, aktif = false, id = null } = {}) {
+  // Stok barang dihitung per (barang, gudang). `stok` pada daftar barang = total semua gudang; `per_gudang` = rincian (yang tidak nol).
+  // Dengan { gudang }, setiap baris juga membawa `stok_gudang` (stok di gudang itu).
+  function stokList({ unit = null, aktif = false, id = null, gudang = null } = {}) {
     const c = [], p = [];
     if (unit) { c.push('i.unit_id = ?'); p.push(unit); }
     if (aktif) c.push('i.aktif = 1');
     if (id) { c.push('i.id = ?'); p.push(id); }
-    return all(`${STOK_SQL} ${c.length ? 'WHERE ' + c.join(' AND ') : ''} GROUP BY i.id ORDER BY u.kode, i.nama`, ...p).map(decorate);
+    const rows = all(`${STOK_SQL} ${c.length ? 'WHERE ' + c.join(' AND ') : ''} GROUP BY i.id ORDER BY u.kode, i.nama`, ...p).map(decorate);
+    if (!rows.length) return rows;
+    const cg = ["t.status = 'DISETUJUI'"], pg = [];
+    if (unit) { cg.push('g.unit_id = ?'); pg.push(unit); }
+    if (id) { cg.push('t.item_id = ?'); pg.push(id); }
+    const per = new Map();
+    for (const r of all(`SELECT t.item_id, t.gudang_id, g.kode AS gudang_kode, g.nama AS gudang_nama, SUM(CASE t.jenis WHEN 'MASUK' THEN t.qty ELSE -t.qty END) AS stok
+                         FROM transactions t JOIN gudang g ON g.id = t.gudang_id WHERE ${cg.join(' AND ')}
+                         GROUP BY t.item_id, t.gudang_id HAVING ABS(stok) > 1e-9 ORDER BY g.utama DESC, g.kode`, ...pg)) {
+      if (!per.has(r.item_id)) per.set(r.item_id, []);
+      per.get(r.item_id).push({ gudang_id: r.gudang_id, gudang_kode: r.gudang_kode, gudang_nama: r.gudang_nama, stok: r.stok });
+    }
+    for (const r of rows) {
+      r.per_gudang = per.get(r.id) ?? [];
+      if (gudang) r.stok_gudang = r.per_gudang.find((x) => x.gudang_id === gudang)?.stok ?? 0;
+    }
+    return rows;
   }
   const stokItem = (id) => stokList({ id })[0];
+  const gudangUtama = (unitId) => get('SELECT id FROM gudang WHERE unit_id = ? AND utama = 1', unitId).id;
+  const stokDi = (item_id, gudang_id) => get("SELECT COALESCE(SUM(CASE jenis WHEN 'MASUK' THEN qty ELSE -qty END), 0) AS s FROM transactions WHERE item_id = ? AND gudang_id = ? AND status = 'DISETUJUI'", item_id, gudang_id).s;
+  const banyakGudang = (unitId) => get('SELECT COUNT(*) AS n FROM gudang WHERE unit_id = ? AND aktif = 1', unitId).n > 1;
+  // Gudang yang boleh diakses user (404 bila di luar unitnya); aktif=true menolak gudang nonaktif
+  function gudangUntuk(user, id, { aktif = false } = {}) {
+    const g = get('SELECT g.*, u.kode AS unit_kode FROM gudang g JOIN units u ON u.id = g.unit_id WHERE g.id = ?', Number(id));
+    if (!g || !dalamUnit(user, g.unit_id)) throw new HttpError(404, 'Gudang tidak ditemukan');
+    if (aktif && !g.aktif) throw bad(`Gudang ${g.kode} nonaktif`);
+    return g;
+  }
   // Barang yang boleh diakses user (404 bila di luar unitnya)
   function itemUntuk(user, id) {
     const it = stokItem(Number(id));
@@ -90,7 +119,7 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
   function validTx(user, b) {
     const kategori = str(b.kategori);
     const jenis = KATEGORI[kategori];
-    if (!jenis || kategori.startsWith('penyesuaian')) throw bad('Kategori transaksi tidak valid');
+    if (!jenis || KATEGORI_SISTEM(kategori)) throw bad('Kategori transaksi tidak valid');
     const tanggal = str(b.tanggal) || today();
     if (!isDate(tanggal)) throw bad('Format tanggal harus YYYY-MM-DD');
     const qty = num(b.qty, 'Jumlah');
@@ -99,20 +128,25 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
     if (harga_satuan < 0) throw bad('Harga satuan tidak boleh negatif');
     const item = itemUntuk(user, b.item_id);
     if (!item.aktif) throw bad('Barang nonaktif');
-    return { tanggal, jenis, kategori, item_id: item.id, qty, harga_satuan: jenis === 'MASUK' ? harga_satuan : 0, pihak: str(b.pihak), no_dokumen: str(b.no_dokumen), keterangan: str(b.keterangan), stok: item.stok };
+    const gudang = gudangUntuk(user, b.gudang_id || gudangUtama(user.unit_id), { aktif: true });
+    return { tanggal, jenis, kategori, item_id: item.id, gudang_id: gudang.id, gudang_kode: gudang.kode, qty, harga_satuan: jenis === 'MASUK' ? harga_satuan : 0, pihak: str(b.pihak), no_dokumen: str(b.no_dokumen), keterangan: str(b.keterangan), stok: stokDi(item.id, gudang.id) };
   }
   const insertTx = (t, extra = {}) =>
-    run(`INSERT INTO transactions (tanggal,jenis,kategori,item_id,qty,harga_satuan,pihak,no_dokumen,keterangan,opname_id,status,dibuat_oleh,diputuskan_oleh,diputuskan_at,transfer_id)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, t.tanggal, t.jenis, t.kategori, t.item_id, t.qty, t.harga_satuan, t.pihak, t.no_dokumen, t.keterangan,
-      extra.opname_id ?? null, extra.status ?? 'MENUNGGU', extra.dibuat_oleh ?? null, extra.diputuskan_oleh ?? null, extra.diputuskan_oleh ? iso() : null, extra.transfer_id ?? null);
+    run(`INSERT INTO transactions (tanggal,jenis,kategori,item_id,qty,harga_satuan,pihak,no_dokumen,keterangan,opname_id,status,dibuat_oleh,diputuskan_oleh,diputuskan_at,transfer_id,gudang_id,mutasi_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, t.tanggal, t.jenis, t.kategori, t.item_id, t.qty, t.harga_satuan, t.pihak, t.no_dokumen, t.keterangan,
+      extra.opname_id ?? null, extra.status ?? 'MENUNGGU', extra.dibuat_oleh ?? null, extra.diputuskan_oleh ?? null, extra.diputuskan_oleh ? iso() : null, extra.transfer_id ?? null, t.gudang_id ?? null, extra.mutasi_id ?? null);
 
-  // Saldo (hanya transaksi disetujui) tidak boleh negatif pada titik waktu mana pun
+  // Saldo (hanya transaksi disetujui) tidak boleh negatif pada titik waktu mana pun, di setiap gudang
   function assertNoNegative(item_id) {
-    const rows = all("SELECT jenis, qty FROM transactions WHERE item_id = ? AND status = 'DISETUJUI' ORDER BY tanggal, id", item_id);
-    let saldo = 0;
+    const rows = all("SELECT jenis, qty, gudang_id FROM transactions WHERE item_id = ? AND status = 'DISETUJUI' ORDER BY tanggal, id", item_id);
+    const saldo = new Map();
     for (const r of rows) {
-      saldo += r.jenis === 'MASUK' ? r.qty : -r.qty;
-      if (saldo < -1e-9) throw bad('Ditolak: stok akan menjadi negatif');
+      const s = (saldo.get(r.gudang_id) ?? 0) + (r.jenis === 'MASUK' ? r.qty : -r.qty);
+      saldo.set(r.gudang_id, s);
+      if (s < -1e-9) {
+        const g = get('SELECT kode, unit_id FROM gudang WHERE id = ?', r.gudang_id);
+        throw bad(`Ditolak: stok akan menjadi negatif${g && banyakGudang(g.unit_id) ? ` di gudang ${g.kode}` : ''}`);
+      }
     }
   }
   function txUntuk(user, id) {
@@ -128,7 +162,8 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
     throw bad(tipe === 'SEMESTER' ? 'Periode semester berformat YYYY-S1 atau YYYY-S2' : 'Periode bulanan berformat YYYY-MM');
   }
   function opnameUntuk(user, id) {
-    const o = get(`SELECT o.*, u.kode AS unit_kode, u.nama AS unit_nama, c.nama AS pembuat, d.nama AS pemutus FROM opnames o JOIN units u ON u.id = o.unit_id
+    const o = get(`SELECT o.*, u.kode AS unit_kode, u.nama AS unit_nama, gd.kode AS gudang_kode, gd.nama AS gudang_nama, c.nama AS pembuat, d.nama AS pemutus
+                   FROM opnames o JOIN units u ON u.id = o.unit_id JOIN gudang gd ON gd.id = o.gudang_id
                    LEFT JOIN users c ON c.id = o.dibuat_oleh LEFT JOIN users d ON d.id = o.diputuskan_oleh WHERE o.id = ?`, Number(id));
     if (!o || !dalamUnit(user, o.unit_id)) throw new HttpError(404, 'Opname tidak ditemukan');
     o.lines = all(`SELECT l.*, i.kode, i.nama, i.satuan,
@@ -146,6 +181,7 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
     const n = (sql, ...a) => get(sql, ...a).n;
     return {
       jumlah_barang: items.length,
+      jumlah_gudang: get(`SELECT COUNT(*) AS n FROM gudang WHERE aktif = 1 ${unit ? 'AND unit_id = ?' : ''}`, ...p.slice(0, unit ? 1 : 0)).n,
       kosong: items.filter((i) => i.status === 'KOSONG'),
       menipis: items.filter((i) => i.status === 'MENIPIS'),
       nilai_persediaan: items.reduce((s, i) => s + i.nilai, 0),
@@ -159,8 +195,9 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
     };
   }
 
-  function trend(user, { bulan = 12, item_id, kategori = 'pemakaian', ...q }) {
+  function trend(user, { bulan = 12, item_id, kategori = 'pemakaian', gudang_id, ...q }) {
     const unit = unitBaca(user, q);
+    const gid = gudang_id ? gudangUntuk(user, gudang_id).id : null;
     const n = Math.min(Math.max(parseInt(bulan, 10) || 12, 1), 60);
     if (kategori !== 'semua' && !KATEGORI[kategori]) throw bad('Kategori tidak valid');
     if (item_id) itemUntuk(user, item_id);
@@ -170,8 +207,9 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
     const cond = ["t.status = 'DISETUJUI'", "t.jenis = 'KELUAR'", 'substr(t.tanggal,1,7) >= ?'];
     const p = [months[0]];
     if (unit) { cond.push('i.unit_id = ?'); p.push(unit); }
-    if (kategori !== 'semua') { cond.push('t.kategori = ?'); p.push(kategori); }
+    if (kategori !== 'semua') { cond.push('t.kategori = ?'); p.push(kategori); } else cond.push("t.kategori <> 'mutasi_keluar'"); // perpindahan internal bukan pemakaian
     if (item_id) { cond.push('t.item_id = ?'); p.push(Number(item_id)); }
+    if (gid) { cond.push('t.gudang_id = ?'); p.push(gid); }
     const rows = all(`SELECT substr(t.tanggal,1,7) AS bulan, SUM(t.qty) AS qty, SUM(t.qty*t.harga_satuan) AS nilai
                       FROM transactions t JOIN items i ON i.id = t.item_id WHERE ${cond.join(' AND ')} GROUP BY bulan`, ...p);
     const by = Object.fromEntries(rows.map((r) => [r.bulan, r]));
@@ -179,25 +217,29 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
 
     const dari = new Date(Date.now() - 90 * 864e5).toISOString().slice(0, 10);
     const pakai = Object.fromEntries(all(
-      `SELECT item_id, SUM(qty) AS q FROM transactions WHERE kategori='pemakaian' AND status='DISETUJUI' AND tanggal >= ? GROUP BY item_id`, dari)
+      `SELECT item_id, SUM(qty) AS q FROM transactions WHERE kategori='pemakaian' AND status='DISETUJUI' AND tanggal >= ? ${gid ? 'AND gudang_id = ?' : ''} GROUP BY item_id`, dari, ...(gid ? [gid] : []))
       .map((r) => [r.item_id, r.q]));
-    const top = stokList({ unit, aktif: true }).map((i) => {
-      const q90 = pakai[i.id] ?? 0, per_hari = q90 / 90;
-      return { id: i.id, kode: i.kode, nama: i.nama, satuan: i.satuan, unit_kode: i.unit_kode, stok: i.stok, status: i.status,
+    const top = stokList({ unit, aktif: true, gudang: gid }).map((i) => {
+      const q90 = pakai[i.id] ?? 0, per_hari = q90 / 90, stok = gid ? i.stok_gudang : i.stok; // dengan filter gudang: stok & perkiraan habis untuk gudang itu
+      return { id: i.id, kode: i.kode, nama: i.nama, satuan: i.satuan, unit_kode: i.unit_kode, stok, status: gid ? null : i.status,
         pemakaian_90_hari: q90, rata_per_bulan: per_hari * 30,
-        sisa_hari: per_hari > 0 ? Math.floor(Math.max(i.stok, 0) / per_hari) : null };
+        sisa_hari: per_hari > 0 ? Math.floor(Math.max(stok, 0) / per_hari) : null };
     }).filter((i) => i.pemakaian_90_hari > 0).sort((a, b) => b.pemakaian_90_hari - a.pemakaian_90_hari);
     return { series, top };
   }
 
-  function kartuStok(user, item_id) {
+  // Tanpa gudang_id: semua gudang (saldo = total barang). Dengan gudang_id: hanya gudang itu (saldo = stok gudang).
+  function kartuStok(user, item_id, gudang_id) {
     const item = itemUntuk(user, item_id);
+    const g = gudang_id ? gudangUntuk(user, gudang_id) : null;
+    if (g && g.unit_id !== item.unit_id) throw new HttpError(404, 'Gudang tidak ditemukan');
     let saldo = 0;
-    const rows = all("SELECT * FROM transactions WHERE item_id = ? AND status = 'DISETUJUI' ORDER BY tanggal, id", item.id).map((t) => {
+    const rows = all(`SELECT t.*, gd.kode AS gudang_kode, gd.nama AS gudang_nama FROM transactions t LEFT JOIN gudang gd ON gd.id = t.gudang_id
+                      WHERE t.item_id = ? AND t.status = 'DISETUJUI' ${g ? 'AND t.gudang_id = ?' : ''} ORDER BY t.tanggal, t.id`, item.id, ...(g ? [g.id] : [])).map((t) => {
       saldo += t.jenis === 'MASUK' ? t.qty : -t.qty;
       return { ...t, saldo };
     });
-    return { item, rows };
+    return { item, rows, gudang: g };
   }
 
   // ---------- Pengguna & unit (super admin) ----------
@@ -230,7 +272,8 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
   const userRow = (id) => get(`SELECT u.id, u.username, u.nama, u.email, u.role, u.unit_id, u.aktif, un.kode AS unit_kode, un.nama AS unit_nama
                                FROM users u LEFT JOIN units un ON un.id = u.unit_id WHERE u.id = ?`, id);
 
-  const transfer = transferRoutes({ all, get, run, tx, audit, need, stokItem, itemUntuk, assertNoNegative, insertTx, bad, str, num, isDate, today, HttpError, kabari, penerima, iso });
+  const transfer = transferRoutes({ all, get, run, tx, audit, need, stokItem, itemUntuk, assertNoNegative, insertTx, bad, str, num, isDate, today, HttpError, kabari, penerima, iso, stokDi, gudangUntuk, gudangUtama });
+  const gudang = createGudang({ all, get, run, tx, audit, need, bad, str, num, isDate, today, HttpError, kabari, penerima, iso, stokItem, itemUntuk, stokDi, gudangUntuk, insertTx, assertNoNegative });
 
   const kodeBarang = createKodeBarang({ all, get, run, tx, audit, need, bad, str, HttpError });
 
@@ -248,11 +291,13 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
     if (tr !== undefined) return tr;
     const kb = kodeBarang(method, path, query, body, user);
     if (kb !== undefined) return kb;
+    const gd = gudang(method, path, query, body, user);
+    if (gd !== undefined) return gd;
     let m;
     if (method === 'GET' && path === '/api/meta') return { kategori: KATEGORI };
     if (method === 'GET' && path === '/api/dashboard') return dashboard(user, query);
     if (method === 'GET' && path === '/api/laporan/trend') return trend(user, query);
-    if (method === 'GET' && path === '/api/laporan/kartu-stok') return kartuStok(user, query.item_id);
+    if (method === 'GET' && path === '/api/laporan/kartu-stok') return kartuStok(user, query.item_id, query.gudang_id);
 
     // Unit
     if (path === '/api/unit' && method === 'GET')
@@ -311,7 +356,8 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
 
     // Barang
     if (path === '/api/items' && method === 'GET') {
-      const rows = stokList({ unit: unitBaca(user, query), aktif: !query.semua });
+      const gudang = query.gudang_id ? gudangUntuk(user, query.gudang_id).id : null;
+      const rows = stokList({ unit: unitBaca(user, query), aktif: !query.semua, gudang });
       return query.status ? rows.filter((r) => r.status === query.status) : rows;
     }
     if (path === '/api/items' && method === 'POST') {
@@ -329,7 +375,7 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
           v.kode, v.nama, v.kategori, v.satuan, v.stok_minimum, v.kode_barang, body.aktif === false || body.aktif === 0 ? 0 : 1, it.id);
         return stokItem(it.id);
       }
-      if (get('SELECT 1 FROM transactions WHERE item_id = ? LIMIT 1', it.id) || get('SELECT 1 FROM opname_lines WHERE item_id = ? LIMIT 1', it.id) || get('SELECT 1 FROM transfers WHERE item_asal_id = ? OR item_tujuan_id = ? LIMIT 1', it.id, it.id))
+      if (get('SELECT 1 FROM transactions WHERE item_id = ? LIMIT 1', it.id) || get('SELECT 1 FROM opname_lines WHERE item_id = ? LIMIT 1', it.id) || get('SELECT 1 FROM transfers WHERE item_asal_id = ? OR item_tujuan_id = ? LIMIT 1', it.id, it.id) || get('SELECT 1 FROM mutasi WHERE item_id = ? LIMIT 1', it.id))
         throw bad('Barang sudah punya riwayat; nonaktifkan saja (aktif = false)');
       run('DELETE FROM items WHERE id = ?', it.id);
       return { ok: true };
@@ -343,18 +389,19 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
       for (const [k, col] of [['jenis', 't.jenis'], ['kategori', 't.kategori'], ['status', 't.status']])
         if (query[k]) { cond.push(`${col} = ?`); p.push(query[k]); }
       if (query.item_id) { cond.push('t.item_id = ?'); p.push(Number(query.item_id)); }
+      if (query.gudang_id) { cond.push('t.gudang_id = ?'); p.push(Number(query.gudang_id)); }
       if (query.dari) { cond.push('t.tanggal >= ?'); p.push(query.dari); }
       if (query.sampai) { cond.push('t.tanggal <= ?'); p.push(query.sampai); }
       const limit = Math.min(parseInt(query.limit, 10) || 200, 20000);
-      return all(`SELECT t.*, i.kode, i.nama, i.satuan, un.kode AS unit_kode, c.nama AS pembuat, d.nama AS pemutus
-                  FROM transactions t JOIN items i ON i.id = t.item_id JOIN units un ON un.id = i.unit_id
+      return all(`SELECT t.*, i.kode, i.nama, i.satuan, un.kode AS unit_kode, gd.kode AS gudang_kode, gd.nama AS gudang_nama, c.nama AS pembuat, d.nama AS pemutus
+                  FROM transactions t JOIN items i ON i.id = t.item_id JOIN units un ON un.id = i.unit_id LEFT JOIN gudang gd ON gd.id = t.gudang_id
                   LEFT JOIN users c ON c.id = t.dibuat_oleh LEFT JOIN users d ON d.id = t.diputuskan_oleh
                   ${cond.length ? 'WHERE ' + cond.join(' AND ') : ''} ORDER BY t.tanggal DESC, t.id DESC LIMIT ${limit}`, ...p);
     }
     if (path === '/api/transaksi' && method === 'POST') {
       need(user, OP);
       const v = validTx(user, body);
-      if (v.jenis === 'KELUAR' && v.qty > v.stok + 1e-9) throw bad(`Stok tersedia hanya ${v.stok}`);
+      if (v.jenis === 'KELUAR' && v.qty > v.stok + 1e-9) throw bad(`Stok tersedia${banyakGudang(user.unit_id) ? ` di gudang ${v.gudang_kode}` : ''} hanya ${v.stok}`);
       const r = insertTx(v, { status: 'MENUNGGU', dibuat_oleh: user.id });
       kabari(penerima(user.unit_id, 'APPROVER'), user.id);
       return [201, { id: Number(r.lastInsertRowid), status: 'MENUNGGU' }];
@@ -393,9 +440,9 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
     // Opname
     if (path === '/api/opname' && method === 'GET') {
       const unit = unitBaca(user, query);
-      return all(`SELECT o.*, u.kode AS unit_kode, (SELECT COUNT(*) FROM opname_lines WHERE opname_id=o.id) AS jumlah_barang,
+      return all(`SELECT o.*, u.kode AS unit_kode, gd.kode AS gudang_kode, (SELECT COUNT(*) FROM opname_lines WHERE opname_id=o.id) AS jumlah_barang,
         (SELECT COUNT(*) FROM opname_lines WHERE opname_id=o.id AND stok_fisik IS NOT NULL AND stok_fisik <> stok_sistem) AS jumlah_selisih
-        FROM opnames o JOIN units u ON u.id = o.unit_id ${unit ? 'WHERE o.unit_id = ?' : ''} ORDER BY o.periode DESC, o.id DESC`, ...(unit ? [unit] : []));
+        FROM opnames o JOIN units u ON u.id = o.unit_id JOIN gudang gd ON gd.id = o.gudang_id ${unit ? 'WHERE o.unit_id = ?' : ''} ORDER BY o.periode DESC, o.id DESC`, ...(unit ? [unit] : []));
     }
     if (path === '/api/opname' && method === 'POST') {
       need(user, OP);
@@ -403,12 +450,14 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
       validPeriode(tipe, periode);
       const tanggal = str(body.tanggal) || today();
       if (!isDate(tanggal)) throw bad('Format tanggal harus YYYY-MM-DD');
-      if (get('SELECT 1 FROM opnames WHERE unit_id=? AND tipe=? AND periode=?', user.unit_id, tipe, periode)) throw bad(`Opname ${tipe.toLowerCase()} periode ${periode} sudah ada`);
+      const gudang = gudangUntuk(user, body.gudang_id || gudangUtama(user.unit_id), { aktif: true });
+      if (get('SELECT 1 FROM opnames WHERE unit_id=? AND gudang_id=? AND tipe=? AND periode=?', user.unit_id, gudang.id, tipe, periode))
+        throw bad(`Opname ${tipe.toLowerCase()} periode ${periode}${banyakGudang(user.unit_id) ? ` untuk gudang ${gudang.kode}` : ''} sudah ada`);
       return tx(() => {
-        const r = run('INSERT INTO opnames (unit_id,tipe,periode,tanggal,catatan,dibuat_oleh) VALUES (?,?,?,?,?,?)', user.unit_id, tipe, periode, tanggal, str(body.catatan), user.id);
+        const r = run('INSERT INTO opnames (unit_id,gudang_id,tipe,periode,tanggal,catatan,dibuat_oleh) VALUES (?,?,?,?,?,?,?)', user.unit_id, gudang.id, tipe, periode, tanggal, str(body.catatan), user.id);
         const id = Number(r.lastInsertRowid);
         for (const i of stokList({ unit: user.unit_id, aktif: true }))
-          run('INSERT INTO opname_lines (opname_id,item_id,stok_sistem) VALUES (?,?,?)', id, i.id, i.stok);
+          run('INSERT INTO opname_lines (opname_id,item_id,stok_sistem) VALUES (?,?,?)', id, i.id, stokDi(i.id, gudang.id));
         return [201, opnameUntuk(user, id)];
       });
     }
@@ -452,18 +501,20 @@ export function createApi(db, { notif = null, sekarang = () => Date.now() } = {}
       if (method === 'POST' && aksi === 'finalisasi') {
         need(user, AP);
         if (o.status !== 'DIAJUKAN') throw bad('Opname belum diajukan');
-        const pending = get(`SELECT COUNT(*) AS n FROM transactions t JOIN items i ON i.id=t.item_id WHERE t.status='MENUNGGU' AND i.unit_id=?`, o.unit_id).n;
+        // yang menunggu pada gudang ini (transaksi atau mutasi) harus diputuskan dulu agar stok sistem pasti
+        const pending = get("SELECT COUNT(*) AS n FROM transactions WHERE status = 'MENUNGGU' AND gudang_id = ?", o.gudang_id).n
+          + get("SELECT COUNT(*) AS n FROM mutasi WHERE status = 'MENUNGGU' AND (gudang_asal_id = @g OR gudang_tujuan_id = @g)", { g: o.gudang_id }).n;
         if (pending) throw bad(`Masih ada ${pending} transaksi menunggu persetujuan; putuskan dulu sebelum finalisasi`);
         return tx(() => {
           for (const l of o.lines) {
-            const sekarang = stokItem(l.item_id);
-            const selisih = l.stok_fisik - sekarang.stok;
-            run('UPDATE opname_lines SET stok_sistem=? WHERE opname_id=? AND item_id=?', sekarang.stok, o.id, l.item_id);
+            const stokG = stokDi(l.item_id, o.gudang_id);
+            const selisih = l.stok_fisik - stokG;
+            run('UPDATE opname_lines SET stok_sistem=? WHERE opname_id=? AND item_id=?', stokG, o.id, l.item_id);
             if (Math.abs(selisih) < 1e-9) continue;
             insertTx({
-              tanggal: o.tanggal, jenis: selisih > 0 ? 'MASUK' : 'KELUAR',
+              tanggal: o.tanggal, jenis: selisih > 0 ? 'MASUK' : 'KELUAR', gudang_id: o.gudang_id,
               kategori: selisih > 0 ? 'penyesuaian_masuk' : 'penyesuaian_keluar',
-              item_id: l.item_id, qty: Math.abs(selisih), harga_satuan: sekarang.harga_rata,
+              item_id: l.item_id, qty: Math.abs(selisih), harga_satuan: stokItem(l.item_id).harga_rata,
               pihak: '', no_dokumen: `OPNAME-${o.periode}`, keterangan: `Penyesuaian stok opname ${o.tipe.toLowerCase()} ${o.periode}`,
             }, { opname_id: o.id, status: 'DISETUJUI', dibuat_oleh: o.dibuat_oleh, diputuskan_oleh: user.id });
             assertNoNegative(l.item_id);

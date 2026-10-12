@@ -31,25 +31,35 @@ export function susunData(nama, api, query, user) {
 
   switch (nama) {
     case 'stok': {
-      const rows = get('/api/items', { unit_id: query.unit_id, status: query.status });
-      ds.judul = query.status === 'KOSONG' ? 'Daftar Stok Kosong' : query.status === 'MENIPIS' ? 'Daftar Stok Menipis' : 'Laporan Stok Persediaan';
+      let rows = get('/api/items', { unit_id: query.unit_id, status: query.status, gudang_id: query.gudang_id });
+      const gd = query.gudang_id ? get('/api/gudang').find((g) => g.id === Number(query.gudang_id)) : null;
+      if (gd) { // laporan satu gudang: hanya barang yang berstok di sana, dinilai dari stok gudang itu (harga rata-rata tetap per barang)
+        ds.info.push(['Gudang', `${gd.kode} - ${gd.nama}`]);
+        rows = rows.filter((r) => r.stok_gudang > 1e-9).map((r) => ({ ...r, nilai: r.stok_gudang * r.harga_rata }));
+      }
+      const banyak = !gd && rows.some((r) => r.per_gudang.length > 1); // tampilkan rincian hanya bila ada barang yang tersebar di beberapa gudang
+      ds.judul = query.status === 'KOSONG' ? 'Daftar Stok Kosong' : query.status === 'MENIPIS' ? 'Daftar Stok Menipis' : gd ? `Laporan Stok Gudang ${gd.kode}` : 'Laporan Stok Persediaan';
       ds.bagian.push({
-        sheet: 'Stok', kolom: [...unitCol, col('kode', 'Kode', 'teks', 12), col('nama', 'Nama Barang', 'teks', 28), col('kode_barang', 'Kode Barang', 'teks', 16),
-          col('kategori', 'Kategori', 'teks', 14), col('satuan', 'Satuan', 'teks', 8), col('stok', 'Stok', 'angka', 9), col('stok_minimum', 'Stok Min', 'angka', 9),
-          col('harga_rata', 'Harga Rata-rata', 'rp', 14), col('nilai', 'Nilai', 'rp', 15), col('status', 'Status', 'teks', 10)],
-        baris: rows.map((r) => ({ ...r, kode_barang: r.kode_barang ? formatKode(r.kode_barang) : '' })), total: ['nilai'],
+        sheet: gd ? `Stok ${gd.kode}`.slice(0, 31) : 'Stok',
+        kolom: [...unitCol, col('kode', 'Kode', 'teks', 12), col('nama', 'Nama Barang', 'teks', 28), col('kode_barang', 'Kode Barang', 'teks', 16),
+          col('kategori', 'Kategori', 'teks', 14), col('satuan', 'Satuan', 'teks', 8),
+          ...(gd ? [col('stok_gudang', `Stok di ${gd.kode}`, 'angka', 12)] : [col('stok', 'Stok', 'angka', 9), col('stok_minimum', 'Stok Min', 'angka', 9)]),
+          col('harga_rata', 'Harga Rata-rata', 'rp', 14), col('nilai', 'Nilai', 'rp', 15),
+          ...(gd ? [] : [col('status', 'Status', 'teks', 10)]), ...(banyak ? [col('rincian', 'Rincian Gudang', 'teks', 26)] : [])],
+        baris: rows.map((r) => ({ ...r, kode_barang: r.kode_barang ? formatKode(r.kode_barang) : '', rincian: r.per_gudang.map((g) => `${g.gudang_kode}: ${g.stok}`).join('; ') })), total: ['nilai'],
       });
       break;
     }
     case 'transaksi': {
       const limit = 20000;
-      const rows = get('/api/transaksi', { ...pick(query, ['unit_id', 'jenis', 'kategori', 'status', 'dari', 'sampai', 'item_id']), limit });
+      const rows = get('/api/transaksi', { ...pick(query, ['unit_id', 'jenis', 'kategori', 'status', 'dari', 'sampai', 'item_id', 'gudang_id']), limit });
+      const banyakG = new Set(rows.map((r) => r.gudang_id)).size > 1 || !!query.gudang_id;
       ds.judul = `Laporan Transaksi ${query.jenis === 'MASUK' ? 'Masuk' : query.jenis === 'KELUAR' ? 'Keluar' : 'Persediaan'}`;
       if (query.dari || query.sampai) ds.info.push(['Periode', `${query.dari || '...'} s.d. ${query.sampai || '...'}`]);
       if (query.status) ds.info.push(['Status', query.status]);
       ds.bagian.push({
         sheet: 'Transaksi', kolom: [col('tanggal', 'Tanggal', 'tgl', 11), ...unitCol, col('jenis', 'Jenis', 'teks', 8), col('kategori', 'Kategori', 'teks', 18),
-          col('kode', 'Kode', 'teks', 11), col('nama', 'Barang', 'teks', 24), col('qty', 'Jumlah', 'angka', 9), col('satuan', 'Satuan', 'teks', 8),
+          col('kode', 'Kode', 'teks', 11), col('nama', 'Barang', 'teks', 24), ...(banyakG ? [col('gudang_kode', 'Gudang', 'teks', 9)] : []), col('qty', 'Jumlah', 'angka', 9), col('satuan', 'Satuan', 'teks', 8),
           col('harga_satuan', 'Harga Satuan', 'rp', 13), col('nilai', 'Nilai', 'rp', 14), col('pihak', 'Pihak', 'teks', 16), col('no_dokumen', 'Dokumen', 'teks', 14), col('status', 'Status', 'teks', 11)],
         baris: rows.map((r) => ({ ...r, kategori: LABEL[r.kategori] ?? r.kategori, nilai: r.qty * r.harga_satuan })),
         total: query.jenis ? ['nilai'] : null,
@@ -58,12 +68,13 @@ export function susunData(nama, api, query, user) {
       break;
     }
     case 'kartu-stok': {
-      const { item, rows } = get('/api/laporan/kartu-stok', { item_id: query.item_id });
+      const { item, rows, gudang } = get('/api/laporan/kartu-stok', pick(query, ['item_id', 'gudang_id']));
       ds.judul = 'Kartu Stok';
       ds.info = [['Unit', `${item.unit_kode} - ${item.unit_nama}`], ['Barang', `${item.kode} - ${item.nama}`],
-        ['Kode barang', item.kode_barang ? `${formatKode(item.kode_barang)} (${item.kode_barang_uraian ?? ''})` : '-'], ['Satuan', item.satuan], ['Stok akhir', `${item.stok} ${item.satuan}`], ['Per tanggal', hariIni()]];
+        ['Kode barang', item.kode_barang ? `${formatKode(item.kode_barang)} (${item.kode_barang_uraian ?? ''})` : '-'], ['Satuan', item.satuan], ['Gudang', gudang ? `${gudang.kode} - ${gudang.nama}` : 'Semua gudang'],
+        ['Stok akhir', `${gudang ? (rows.at(-1)?.saldo ?? 0) : item.stok} ${item.satuan}`], ['Per tanggal', hariIni()]];
       ds.bagian.push({
-        sheet: 'Kartu Stok', kolom: [col('tanggal', 'Tanggal', 'tgl', 11), col('kategori', 'Kategori', 'teks', 20), col('no_dokumen', 'Dokumen', 'teks', 16), col('pihak', 'Pihak', 'teks', 18),
+        sheet: 'Kartu Stok', kolom: [col('tanggal', 'Tanggal', 'tgl', 11), col('kategori', 'Kategori', 'teks', 20), ...(gudang ? [] : [col('gudang_kode', 'Gudang', 'teks', 9)]), col('no_dokumen', 'Dokumen', 'teks', 16), col('pihak', 'Pihak', 'teks', 18),
           col('masuk', 'Masuk', 'angka', 10), col('keluar', 'Keluar', 'angka', 10), col('saldo', 'Saldo', 'angka', 10), col('harga_satuan', 'Harga Satuan', 'rp', 13)],
         baris: rows.map((r) => ({ ...r, kategori: LABEL[r.kategori] ?? r.kategori, masuk: r.jenis === 'MASUK' ? r.qty : null, keluar: r.jenis === 'KELUAR' ? r.qty : null })),
         total: ['masuk', 'keluar'],
@@ -73,7 +84,7 @@ export function susunData(nama, api, query, user) {
     case 'opname': {
       const o = get(`/api/opname/${Number(query.id)}`);
       ds.judul = `Lembar Stok Opname ${o.tipe === 'SEMESTER' ? 'Semester' : 'Bulanan'}`;
-      ds.info = [['Unit', `${o.unit_kode} - ${o.unit_nama}`], ['Periode', o.periode], ['Tanggal opname', o.tanggal], ['Status', o.status], ...(o.catatan ? [['Catatan', o.catatan]] : [])];
+      ds.info = [['Unit', `${o.unit_kode} - ${o.unit_nama}`], ['Gudang', `${o.gudang_kode} - ${o.gudang_nama}`], ['Periode', o.periode], ['Tanggal opname', o.tanggal], ['Status', o.status], ...(o.catatan ? [['Catatan', o.catatan]] : [])];
       ds.bagian.push({
         sheet: 'Opname', kolom: [col('no', 'No', 'angka', 5), col('kode', 'Kode', 'teks', 12), col('nama', 'Nama Barang', 'teks', 28), col('satuan', 'Satuan', 'teks', 8),
           col('stok_sistem', 'Stok Sistem', 'angka', 11), col('stok_fisik', 'Stok Fisik', 'angka', 11), col('selisih', 'Selisih', 'angka', 10), col('keterangan', 'Keterangan', 'teks', 24)],
@@ -87,7 +98,7 @@ export function susunData(nama, api, query, user) {
       ds.judul = 'Laporan Transfer Antar Unit';
       ds.bagian.push({
         sheet: 'Transfer', kolom: [col('id', 'No', 'angka', 5), col('tanggal', 'Tanggal', 'tgl', 11), col('unit_asal_kode', 'Dari', 'teks', 8), col('unit_tujuan_kode', 'Ke', 'teks', 8),
-          col('barang', 'Barang', 'teks', 26), col('qty', 'Dikirim', 'angka', 9), col('qty_diterima', 'Diterima', 'angka', 9), col('satuan', 'Satuan', 'teks', 8),
+          col('barang', 'Barang', 'teks', 26), col('gudang_asal_kode', 'Gudang Asal', 'teks', 10), col('gudang_tujuan_kode', 'Gudang Tujuan', 'teks', 10), col('qty', 'Dikirim', 'angka', 9), col('qty_diterima', 'Diterima', 'angka', 9), col('satuan', 'Satuan', 'teks', 8),
           col('barang_tujuan', 'Barang di Tujuan', 'teks', 26), col('status', 'Status', 'teks', 22), col('catatan', 'Catatan', 'teks', 24)],
         baris: rows.map((r) => ({
           ...r, barang: `${r.item_asal_kode} - ${r.item_asal_nama}`, barang_tujuan: r.item_tujuan_kode ? `${r.item_tujuan_kode} - ${r.item_tujuan_nama}` : '',
@@ -98,7 +109,8 @@ export function susunData(nama, api, query, user) {
       break;
     }
     case 'tren': {
-      const t = get('/api/laporan/trend', pick(query, ['unit_id', 'bulan', 'item_id', 'kategori']));
+      const t = get('/api/laporan/trend', pick(query, ['unit_id', 'bulan', 'item_id', 'kategori', 'gudang_id']));
+      if (query.gudang_id) { const g = get('/api/gudang').find((x) => x.id === Number(query.gudang_id)); if (g) ds.info.push(['Gudang', `${g.kode} - ${g.nama}`]); }
       ds.judul = 'Laporan Tren Pemakaian Persediaan';
       ds.info.push(['Jenis', query.kategori && query.kategori !== 'semua' ? (LABEL[query.kategori] ?? query.kategori) : query.kategori === 'semua' ? 'Semua barang keluar' : 'Pemakaian']);
       ds.bagian.push(
